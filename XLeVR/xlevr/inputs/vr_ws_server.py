@@ -26,6 +26,7 @@ class VRControllerState:
         self.hand = hand
         self.grip_active = False
         self.trigger_active = False
+        self.thumbstick_active = False  # Track if thumbstick was active (for detecting return to neutral)
         
         # Position tracking for relative movement
         self.origin_position = None
@@ -211,35 +212,6 @@ class VRWebSocketServer(BaseInputProvider):
             for info in button_info:
                 print(f"  {info}")
         
-        # Process headset data if available
-        if 'headset' in data:
-            headset_data = data['headset']
-            if headset_data and headset_data.get('position'):
-                pos = headset_data['position']
-                rot = headset_data.get('rotation', {})
-                quat = headset_data.get('quaternion', {})
-                
-                print(f"[VR_WS] Headset - Position: [{pos.get('x', 0):.3f}, {pos.get('y', 0):.3f}, {pos.get('z', 0):.3f}], "
-                      f"Rotation: [{rot.get('x', 0):.1f}, {rot.get('y', 0):.1f}, {rot.get('z', 0):.1f}]")
-                
-                # Create headset ControlGoal
-                headset_position = np.array([pos.get('x', 0), pos.get('y', 0), pos.get('z', 0)])
-                headset_goal = ControlGoal(
-                    arm="headset",
-                    mode=ControlMode.POSITION_CONTROL,
-                    target_position=headset_position,
-                    wrist_roll_deg=rot.get('y', 0),  # Yaw rotation
-                    wrist_flex_deg=rot.get('x', 0),   # Pitch rotation
-                    metadata={
-                        "source": "vr_headset",
-                        "relative_position": False,
-                        "vr_position": headset_position.tolist(),
-                        "rotation": rot,
-                        "quaternion": quat
-                    }
-                )
-                await self.send_goal(headset_goal)
-        
         # Process controller data
         if 'leftController' in data:
             await self.process_single_controller('left', data['leftController'])
@@ -279,84 +251,14 @@ class VRWebSocketServer(BaseInputProvider):
             
             logger.info(f"🤏 {hand.upper()} gripper {'OPENED' if trigger_active else 'CLOSED'}")
         
-        # 修改：直接响应控制器位置，不需要按squeeze键
-        # 检查是否有位置数据
-        if position and all(k in position for k in ['x', 'y', 'z']):
-            # 如果还没有设置原点，设置当前位置为原点
-            if controller.origin_position is None:
-                controller.origin_position = np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
-                
-                # 设置四元数原点
-                if quaternion and all(k in quaternion for k in ['x', 'y', 'z', 'w']):
-                    controller.origin_quaternion = np.array([quaternion['x'], quaternion['y'], quaternion['z'], quaternion['w']])
-                else:
-                    controller.origin_quaternion = self.euler_to_quaternion(rotation) if rotation else None
-                
-                controller.accumulated_rotation_quat = controller.origin_quaternion
-                controller.z_axis_rotation = 0.0
-                controller.x_axis_rotation = 0.0
-                
-                # 发送重置信号
-                reset_goal = ControlGoal(
-                    arm=hand,
-                    mode=ControlMode.POSITION_CONTROL,
-                    target_position=None,
-                    metadata={
-                        "source": f"vr_auto_reset_{hand}",
-                        "reset_target_to_current": True,
-                        "trigger": trigger,
-                        "trigger_active": trigger_active,
-                        "thumbstick": thumbstick
-                    }
-                )
-                await self.send_goal(reset_goal)
-                logger.info(f"🎯 {hand.upper()} auto-activated - controlling {hand} arm")
-            
-            # 计算目标位置 - 改为绝对位置控制
-            position_array = np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
-            
-            # 直接使用VR控制器的绝对位置，应用缩放
-            absolute_position = position_array * self.config.vr_to_robot_scale
-            
-            # 计算手腕旋转
-            if controller.origin_quaternion is not None:
-                if quaternion and all(k in quaternion for k in ['x', 'y', 'z', 'w']):
-                    current_quat = np.array([quaternion['x'], quaternion['y'], quaternion['z'], quaternion['w']])
-                    self.update_quaternion_rotation_direct(controller, current_quat)
-                else:
-                    self.update_quaternion_rotation(controller, rotation)
-                
-                controller.z_axis_rotation = self.extract_roll_from_quaternion(controller.accumulated_rotation_quat, controller.origin_quaternion)
-                controller.x_axis_rotation = self.extract_pitch_from_quaternion(controller.accumulated_rotation_quat, controller.origin_quaternion)
-            
-            # 创建绝对位置控制目标
-            goal = ControlGoal(
-                arm=hand,
-                mode=ControlMode.POSITION_CONTROL,
-                target_position=absolute_position,  # 绝对位置
-                wrist_roll_deg=-controller.z_axis_rotation,
-                wrist_flex_deg=-controller.x_axis_rotation,
-                metadata={
-                    "source": "vr_absolute_position",
-                    "relative_position": False,  # 标记为绝对位置
-                    "vr_position": position_array.tolist(),
-                    "scaled_position": absolute_position.tolist(),
-                    "trigger": trigger,
-                    "trigger_active": trigger_active,
-                    "thumbstick": thumbstick
-                }
-            )
-            await self.send_goal(goal)
-        
-        # 保留原有的squeeze键逻辑作为备用（可选）
-        # 如果你想完全移除squeeze键控制，可以注释掉下面的代码
-        """
-        # Handle grip button for arm movement control (original logic)
+        # Handle grip button for arm movement control
+        # Arms ONLY move when grip button is pressed (squeeze to activate)
         if grip_active:
             if not controller.grip_active:
-                print_pose()
                 # Grip just activated - set origin and reset target position
                 controller.grip_active = True
+                # Reset thumbstick tracking since grip is now controlling
+                controller.thumbstick_active = False
                 # Convert position dict to numpy array for proper subtraction later
                 controller.origin_position = np.array([position.get('x', 0), position.get('y', 0), position.get('z', 0)])
                 
@@ -438,11 +340,58 @@ class VRWebSocketServer(BaseInputProvider):
                         "origin_position": controller.origin_position.tolist(),
                         "trigger": trigger,
                         "trigger_active": trigger_active,
-                        "thumbstick": thumbstick
+                        "thumbstick": thumbstick,
+                        "gripActive": True  # Signal that grip button is pressed
                     }
                 )
                 await self.send_goal(goal)
-        """
+        else:
+            # Handle grip release - stop arm movement when grip button is released
+            if controller.grip_active:
+                await self.handle_grip_release(hand)
+            
+            # When grip is NOT active, still send thumbstick data for base movement
+            # This allows base control independent of arm control
+            if thumbstick:
+                thumbstick_x = thumbstick.get('x', 0)
+                thumbstick_y = thumbstick.get('y', 0)
+                
+                # Check if thumbstick is currently active (above threshold)
+                thumbstick_has_input = abs(thumbstick_x) > 0.1 or abs(thumbstick_y) > 0.1
+                
+                if thumbstick_has_input:
+                    # Thumbstick is active - send base control goal
+                    base_goal = ControlGoal(
+                        arm=hand,
+                        metadata={
+                            "source": "vr_thumbstick_only",
+                            "thumbstick": thumbstick,
+                            "trigger": trigger,
+                            "trigger_active": trigger_active,
+                            "gripActive": False,
+                            "base_control_only": True  # Signal this is for base movement only
+                        }
+                    )
+                    await self.send_goal(base_goal)
+                    controller.thumbstick_active = True
+                    
+                elif controller.thumbstick_active:
+                    # Thumbstick returned to neutral - send explicit STOP command
+                    stop_goal = ControlGoal(
+                        arm=hand,
+                        metadata={
+                            "source": "vr_thumbstick_stop",
+                            "thumbstick": {"x": 0, "y": 0},  # Zero velocity
+                            "trigger": trigger,
+                            "trigger_active": trigger_active,
+                            "gripActive": False,
+                            "base_control_only": True,
+                            "base_stop": True  # Explicit stop signal
+                        }
+                    )
+                    await self.send_goal(stop_goal)
+                    controller.thumbstick_active = False
+                    logger.info(f"🛑 {hand.upper()} thumbstick returned to neutral - base STOP")
     
     async def handle_grip_release(self, hand: str):
         """Handle grip release for a controller."""

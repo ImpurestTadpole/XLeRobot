@@ -134,7 +134,7 @@ If you want, you can cite this work with:
 
 ```bibtex
 @misc{wang2025xlerobot,
-    author = {Wang, Gaotian and Lu, Zhuoyi},
+    author = {Wang, Gaotian and Lu, Zhuoyi and Yiyang, Huang and Yihao, Liu},
     title = {XLeRobot: A Practical Low-cost Household Dual-Arm Mobile Robot Design for General Manipulation},
     howpublished = "\url{https://github.com/Vector-Wangel/XLeRobot}",
     year = {2025}

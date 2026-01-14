@@ -4,6 +4,32 @@ Here briefly introduce how to build the dual wheel version.
 
 (This page is still under construction)
 
+## Intro
+Main changes compared to 0.3.0:
+
+- Dual wheel: More stable, higher moving speed, better passability, and larger torque (compared to 3 omni-wheels). 2 verisons: servo motors and brushless motors.
+- Improved top base design: modular arm base with changable arm installing directions. 360 degree and compact head design.  
+
+This 0.4.0 version of XLeRobot is the last version that is fully based on Feetech servo motors and the SO101 chassis. After extensive testing and research, we realized the limitations of servo motors (speed, noise, payload, etc.), and we believe this hardware version offers the best balance among cost, ease of assembly, stability, and practicality.
+
+Regarding a lifting (height-adjustable) base, we have also explored related designs, but the maintenance difficulty and stability issues make it hard to achieve a good solution using only servo motors. For most development scenarios, mobility at desk height is already sufficient to support initial research and development needs. We also found that adding more degrees of freedom increases the difficulty of data collection and hurts policy generalization.
+
+Going forward, we plan to collaborate with Hightorque and wowrobo to build more product-level, low-cost, open-source mobile robots based on higher-performance motors.
+
+
+Official Assembly Videos from Wowrobo:
+<iframe width="800" height="600" 
+    src="https://www.youtube.com/embed/4bXCFw57T60" 
+    frameborder="0" 
+    allowfullscreen>
+</iframe>
+
+<iframe width="800" height="600" 
+    src="//player.bilibili.com/player.html?bvid=BV1JpiqBfEuf&autoplay=0" 
+    frameborder="0" 
+    allowfullscreen>
+</iframe>
+
 ### Servo motor version
 
 Pros: 

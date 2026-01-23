@@ -125,7 +125,6 @@ I am a CS graduate student at Rice University [RobotPi Lab](https://robotpilab.g
 
 I built XLeRobot as a personal hobby to instantiate my research theory, also to provide a low-cost platform for people who are interested in robotics and embodied AI to work with. 
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Vector-Wangel/XLeRobot&type=Timeline)](https://star-history.com/#Vector-Wangel/XLeRobot&Timeline)
 ---
 
 ## Citation

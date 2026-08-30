@@ -355,11 +355,16 @@ body {
   }
 }
 
-/* Hide desktop interface in VR */
-@media (display-mode: standalone) {
-  .desktop-interface {
-    display: none;
-  }
+/* Hide desktop interface in VR.
+   display-mode:standalone only matches an installed PWA, never a normal browser tab -- and
+   the documented flow is "open https://host:8443 in the headset's regular browser", so that
+   media query never actually fired on real hardware. .desktop-interface (z-index 10000,
+   near-opaque, full-viewport) then permanently buried the Start Controller Tracking button
+   (z-index 9999) and everything else underneath it. vr_app.js instead detects a WebXR-capable
+   browser via navigator.xr and toggles this class on <body>, which is a much closer proxy for
+   "this is the headset" than display-mode ever was. */
+body.xr-capable .desktop-interface {
+  display: none;
 }
 
 /* A-Frame scene styling */

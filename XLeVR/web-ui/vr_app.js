@@ -5,7 +5,18 @@
 // a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
 // old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
 // the page has to actually be closed/reopened or hard-reloaded to pick them up).
-const APP_JS_VERSION = '2026-08-30-ws-auto-reconnect';
+const APP_JS_VERSION = '2026-08-30-fix-buried-button';
+
+// Marks <body> so styles.css can hide .desktop-interface (a near-opaque, full-viewport,
+// z-index:10000 landing page) on a WebXR-capable browser -- otherwise it permanently buries
+// the Start Controller Tracking button (z-index 9999) underneath it. See the comment on
+// body.xr-capable in styles.css for why this replaced a display-mode:standalone media query
+// that never matched a normal browser tab. Runs synchronously at script load (this script is
+// `defer`, so document.body already exists) rather than waiting for DOMContentLoaded, so there
+// is no visible flash of the desktop overlay first.
+if (navigator.xr) {
+  document.body.classList.add('xr-capable');
+}
 
 AFRAME.registerComponent('controller-updater', {
   init: function () {

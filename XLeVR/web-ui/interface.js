@@ -263,37 +263,30 @@ function isVRMode() {
   return window.navigator.xr && document.fullscreenElement;
 }
 
-// Update UI based on device
+// Update UI based on device.
+//
+// Previously this branched on navigator.xr.isSessionSupported('immersive-vr'), a Promise that
+// a prior debugging session found silently never resolves (neither .then nor .catch) on at
+// least one real headset browser -- the same failure mode that made the "Start Controller
+// Tracking" button never appear until that async pre-check was removed from vr_app.js. This
+// function had an unfixed copy of the identical bug: when the promise hangs, this "else"
+// branch never sets desktopInterface.style.display at all, so it's left however it started
+// (default 'block', i.e. shown), permanently burying the VR UI underneath the full-viewport
+// desktop overlay -- indistinguishable from "nothing in VR works". Fixed to decide
+// synchronously from navigator.xr's mere presence, same as vr_app.js's body.xr-capable class
+// (see styles.css), instead of waiting on a promise that may never settle. Also no longer sets
+// an inline display style on desktopInterface: that would outrank the CSS class rule by
+// specificity and could reintroduce this exact bug the next time this function runs (e.g. on
+// 'resize').
 function updateUIForDevice() {
-  const desktopInterface = document.getElementById('desktopInterface');
   const vrContent = document.getElementById('vrContent');
-  
-  if (isVRMode()) {
-    desktopInterface.style.display = 'none';
-    vrContent.style.display = 'none';
+
+  if (navigator.xr) {
+    document.body.classList.add('xr-capable');
+    vrContent.style.display = isVRMode() ? 'none' : 'block';
   } else {
-    // Check if this is a VR-capable device
-    if (navigator.xr) {
-      navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
-        if (supported) {
-          // VR-capable device - show VR interface
-          desktopInterface.style.display = 'none';
-          vrContent.style.display = 'block';
-        } else {
-          // Not VR-capable - show desktop interface
-          desktopInterface.style.display = 'block';
-          vrContent.style.display = 'none';
-        }
-      }).catch(() => {
-        // Fallback to desktop interface if XR check fails
-        desktopInterface.style.display = 'block';
-        vrContent.style.display = 'none';
-      });
-    } else {
-      // No XR support - show desktop interface
-      desktopInterface.style.display = 'block';
-      vrContent.style.display = 'none';
-    }
+    document.body.classList.remove('xr-capable');
+    vrContent.style.display = 'none';
   }
 }
 

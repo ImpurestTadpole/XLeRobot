@@ -5,7 +5,7 @@
 // a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
 // old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
 // the page has to actually be closed/reopened or hard-reloaded to pick them up).
-const APP_JS_VERSION = '2026-08-30-hud-buttons';
+const APP_JS_VERSION = '2026-08-30-vr-fallback-2';
 
 AFRAME.registerComponent('controller-updater', {
   init: function () {
@@ -1221,103 +1221,125 @@ function showXrDiagnostic(message) {
     banner.textContent = message;
 }
 
+function createStartTrackingButton(useAR) {
+    // Create Start Controller Tracking button
+    const startButton = document.createElement('button');
+    startButton.id = 'start-tracking-button';
+    startButton.textContent = 'Start Controller Tracking';
+    startButton.style.position = 'fixed';
+    startButton.style.top = '50%';
+    startButton.style.left = '50%';
+    startButton.style.transform = 'translate(-50%, -50%)';
+    startButton.style.padding = '20px 40px';
+    startButton.style.fontSize = '20px';
+    startButton.style.fontWeight = 'bold';
+    startButton.style.backgroundColor = '#4CAF50';
+    startButton.style.color = 'white';
+    startButton.style.border = 'none';
+    startButton.style.borderRadius = '8px';
+    startButton.style.cursor = 'pointer';
+    startButton.style.zIndex = '9999';
+    startButton.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)';
+    startButton.style.transition = 'all 0.3s ease';
+
+    // Hover effects
+    startButton.addEventListener('mouseenter', () => {
+        startButton.style.backgroundColor = '#45a049';
+        startButton.style.transform = 'translate(-50%, -50%) scale(1.05)';
+    });
+    startButton.addEventListener('mouseleave', () => {
+        startButton.style.backgroundColor = '#4CAF50';
+        startButton.style.transform = 'translate(-50%, -50%) scale(1)';
+    });
+
+    startButton.onclick = () => {
+        console.log(`Start Controller Tracking button clicked. Requesting ${useAR ? 'AR' : 'VR'} session via A-Frame...`);
+        const sceneEl = document.querySelector('a-scene');
+        // Create/resume the WebAudio context synchronously inside this click handler,
+        // on the controller-updater component instance (same object playTone() reuses
+        // later, so this actually warms the context playTone will use). getAudioCtx()
+        // is otherwise only reached lazily from the first episode start/stop chime — by
+        // then we're deep inside a WebSocket message callback, not a user-gesture call
+        // stack, and some mobile/Quest browsers refuse to start (or silently keep
+        // suspended) an AudioContext created outside one. This click is the one
+        // guaranteed real user gesture in the whole session.
+        const ctrlComp = sceneEl && sceneEl.components && sceneEl.components['controller-updater'];
+        if (ctrlComp && ctrlComp.getAudioCtx) {
+            try {
+                ctrlComp.getAudioCtx();
+            } catch (err) {
+                console.error('Failed to warm up AudioContext on Start click:', err);
+            }
+        }
+        if (sceneEl) {
+            // Use A-Frame's enterVR to handle session start. useAR=false requests a plain
+            // immersive-vr session (see addControllerTrackingButton's AR->VR fallback).
+            sceneEl.enterVR(useAR).catch((err) => {
+                console.error('A-Frame failed to enter VR/AR:', err);
+                alert(`Failed to start ${useAR ? 'AR' : 'VR'} session via A-Frame: ${err.message}`);
+            });
+        } else {
+             console.error('A-Frame scene not found for enterVR call!');
+        }
+    };
+
+    document.body.appendChild(startButton);
+    console.log(`"Start Controller Tracking" button added (${useAR ? 'AR passthrough' : 'VR-only, no passthrough'} mode).`);
+
+    // Listen for VR session events to hide/show start button
+    const sceneEl = document.querySelector('a-scene');
+    if (sceneEl) {
+        sceneEl.addEventListener('enter-vr', () => {
+            console.log('Entered VR - hiding start button');
+            startButton.style.display = 'none';
+            const banner = document.getElementById('xr-diagnostic-banner');
+            if (banner) banner.remove();
+        });
+
+        sceneEl.addEventListener('exit-vr', () => {
+            console.log('Exited VR - showing start button');
+            startButton.style.display = 'block';
+        });
+    }
+}
+
 function addControllerTrackingButton() {
-    if (navigator.xr) {
-        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
-            if (supported) {
-                // Create Start Controller Tracking button
-                const startButton = document.createElement('button');
-                startButton.id = 'start-tracking-button';
-                startButton.textContent = 'Start Controller Tracking';
-                startButton.style.position = 'fixed';
-                startButton.style.top = '50%';
-                startButton.style.left = '50%';
-                startButton.style.transform = 'translate(-50%, -50%)';
-                startButton.style.padding = '20px 40px';
-                startButton.style.fontSize = '20px';
-                startButton.style.fontWeight = 'bold';
-                startButton.style.backgroundColor = '#4CAF50';
-                startButton.style.color = 'white';
-                startButton.style.border = 'none';
-                startButton.style.borderRadius = '8px';
-                startButton.style.cursor = 'pointer';
-                startButton.style.zIndex = '9999';
-                startButton.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)';
-                startButton.style.transition = 'all 0.3s ease';
-
-                // Hover effects
-                startButton.addEventListener('mouseenter', () => {
-                    startButton.style.backgroundColor = '#45a049';
-                    startButton.style.transform = 'translate(-50%, -50%) scale(1.05)';
-                });
-                startButton.addEventListener('mouseleave', () => {
-                    startButton.style.backgroundColor = '#4CAF50';
-                    startButton.style.transform = 'translate(-50%, -50%) scale(1)';
-                });
-
-                startButton.onclick = () => {
-                    console.log('Start Controller Tracking button clicked. Requesting session via A-Frame...');
-                    const sceneEl = document.querySelector('a-scene');
-                    // Create/resume the WebAudio context synchronously inside this click handler,
-                    // on the controller-updater component instance (same object playTone() reuses
-                    // later, so this actually warms the context playTone will use). getAudioCtx()
-                    // is otherwise only reached lazily from the first episode start/stop chime — by
-                    // then we're deep inside a WebSocket message callback, not a user-gesture call
-                    // stack, and some mobile/Quest browsers refuse to start (or silently keep
-                    // suspended) an AudioContext created outside one. This click is the one
-                    // guaranteed real user gesture in the whole session.
-                    const ctrlComp = sceneEl && sceneEl.components && sceneEl.components['controller-updater'];
-                    if (ctrlComp && ctrlComp.getAudioCtx) {
-                        try {
-                            ctrlComp.getAudioCtx();
-                        } catch (err) {
-                            console.error('Failed to warm up AudioContext on Start click:', err);
-                        }
-                    }
-                    if (sceneEl) {
-                        // Use A-Frame's enterVR to handle session start
-                        sceneEl.enterVR(true).catch((err) => {
-                            console.error('A-Frame failed to enter VR/AR:', err);
-                            alert(`Failed to start AR session via A-Frame: ${err.message}`);
-                        });
-                    } else {
-                         console.error('A-Frame scene not found for enterVR call!');
-                    }
-                };
-
-                document.body.appendChild(startButton);
-                console.log('Official "Start Controller Tracking" button added.');
-
-                // Listen for VR session events to hide/show start button
-                const sceneEl = document.querySelector('a-scene');
-                if (sceneEl) {
-                    sceneEl.addEventListener('enter-vr', () => {
-                        console.log('Entered VR - hiding start button');
-                        startButton.style.display = 'none';
-                        const banner = document.getElementById('xr-diagnostic-banner');
-                        if (banner) banner.remove();
-                    });
-
-                    sceneEl.addEventListener('exit-vr', () => {
-                        console.log('Exited VR - showing start button');
-                        startButton.style.display = 'block';
-                    });
-                }
-
-            } else {
-                console.warn('immersive-ar session not supported by this browser/device.');
+    if (!navigator.xr) {
+        console.warn('WebXR not supported by this browser.');
+        showXrDiagnostic('WebXR is not supported by this browser — open this page in the headset\'s built-in browser.');
+        return;
+    }
+    navigator.xr.isSessionSupported('immersive-ar').then((arSupported) => {
+        if (arSupported) {
+            createStartTrackingButton(true);
+            return;
+        }
+        // Passthrough AR unavailable on this browser/headset -- fall back to a plain VR
+        // session instead of leaving the operator with no button at all (this was previously
+        // a silent dead end: no button, no banner, indistinguishable from a broken page). The
+        // operator loses camera see-through, but can still see the robot via the camera panels
+        // already streamed into the scene (see send_camera_frames / this.cameraPanels), so
+        // teleop is still usable.
+        console.warn('immersive-ar not supported; falling back to immersive-vr (no passthrough).');
+        navigator.xr.isSessionSupported('immersive-vr').then((vrSupported) => {
+            if (vrSupported) {
                 showXrDiagnostic(
-                    'Passthrough AR is not supported by this browser/device — the ' +
-                    '"Start Controller Tracking" button will not appear. Check headset firmware ' +
-                    'and enable any experimental passthrough/AR flags, then reload this page.'
+                    'Passthrough AR is not supported on this device — starting in VR-only mode ' +
+                    '(no see-through). Use the in-scene robot camera panels to see the robot.'
+                );
+                createStartTrackingButton(false);
+            } else {
+                showXrDiagnostic(
+                    'Neither passthrough AR nor VR sessions are supported by this browser/device. ' +
+                    'Check headset firmware and browser WebXR support, then reload this page.'
                 );
             }
         }).catch((err) => {
-            console.error('Error checking immersive-ar support:', err);
-            showXrDiagnostic(`Error checking AR support: ${err.message}`);
+            console.error('Error checking immersive-vr support:', err);
+            showXrDiagnostic(`Error checking VR support: ${err.message}`);
         });
-    } else {
-        console.warn('WebXR not supported by this browser.');
-        showXrDiagnostic('WebXR is not supported by this browser — open this page in the headset\'s built-in browser.');
-    }
+    }).catch((err) => {
+        console.error('Error checking immersive-ar support:', err);
+        showXrDiagnostic(`Error checking AR support: ${err.message}`);
+    });
 } 

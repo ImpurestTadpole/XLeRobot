@@ -5,7 +5,7 @@
 // a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
 // old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
 // the page has to actually be closed/reopened or hard-reloaded to pick them up).
-const APP_JS_VERSION = '2026-08-30-vr-fallback-2';
+const APP_JS_VERSION = '2026-08-30-always-show-button';
 
 AFRAME.registerComponent('controller-updater', {
   init: function () {
@@ -1221,7 +1221,7 @@ function showXrDiagnostic(message) {
     banner.textContent = message;
 }
 
-function createStartTrackingButton(useAR) {
+function createStartTrackingButton() {
     // Create Start Controller Tracking button
     const startButton = document.createElement('button');
     startButton.id = 'start-tracking-button';
@@ -1253,7 +1253,7 @@ function createStartTrackingButton(useAR) {
     });
 
     startButton.onclick = () => {
-        console.log(`Start Controller Tracking button clicked. Requesting ${useAR ? 'AR' : 'VR'} session via A-Frame...`);
+        console.log('Start Controller Tracking button clicked. Requesting session via A-Frame...');
         const sceneEl = document.querySelector('a-scene');
         // Create/resume the WebAudio context synchronously inside this click handler,
         // on the controller-updater component instance (same object playTone() reuses
@@ -1271,20 +1271,33 @@ function createStartTrackingButton(useAR) {
                 console.error('Failed to warm up AudioContext on Start click:', err);
             }
         }
-        if (sceneEl) {
-            // Use A-Frame's enterVR to handle session start. useAR=false requests a plain
-            // immersive-vr session (see addControllerTrackingButton's AR->VR fallback).
-            sceneEl.enterVR(useAR).catch((err) => {
-                console.error('A-Frame failed to enter VR/AR:', err);
-                alert(`Failed to start ${useAR ? 'AR' : 'VR'} session via A-Frame: ${err.message}`);
-            });
-        } else {
-             console.error('A-Frame scene not found for enterVR call!');
+        if (!sceneEl) {
+            console.error('A-Frame scene not found for enterVR call!');
+            showXrDiagnostic('Internal error: <a-scene> not found. Reload the page.');
+            return;
         }
+        // Try AR (passthrough) first, then fall back to plain VR on failure -- resolved here,
+        // at the one guaranteed user-gesture click, instead of gating the button's very
+        // existence on an earlier isSessionSupported() pre-check. That pre-check runs
+        // asynchronously on page load with no user gesture backing it, and on at least one
+        // real headset silently never resolved either branch, meaning the button never
+        // appeared at all with no error anywhere. Trying enterVR directly here can't have that
+        // failure mode: the button is now unconditional, and only this actual attempt can fail.
+        sceneEl.enterVR(true).catch((arErr) => {
+            console.warn('AR session failed, falling back to plain VR:', arErr);
+            return sceneEl.enterVR(false).catch((vrErr) => {
+                console.error('Both AR and VR session requests failed:', arErr, vrErr);
+                showXrDiagnostic(
+                    `Could not start a VR/AR session: ${vrErr.message}. ` +
+                    'Check headset WebXR support and browser permissions, then reload.'
+                );
+                alert(`Failed to start VR/AR session: ${vrErr.message}`);
+            });
+        });
     };
 
     document.body.appendChild(startButton);
-    console.log(`"Start Controller Tracking" button added (${useAR ? 'AR passthrough' : 'VR-only, no passthrough'} mode).`);
+    console.log('"Start Controller Tracking" button added (tries AR, falls back to VR on click).');
 
     // Listen for VR session events to hide/show start button
     const sceneEl = document.querySelector('a-scene');
@@ -1304,42 +1317,15 @@ function createStartTrackingButton(useAR) {
 }
 
 function addControllerTrackingButton() {
+    // Always create the button -- do not gate its existence on an async
+    // navigator.xr.isSessionSupported() pre-check. That check has no user gesture behind it
+    // and on at least one real headset silently never resolved either branch, so the button
+    // never appeared and nothing was ever logged or shown. AR-vs-VR and unsupported-browser
+    // handling now happens at click time instead (see createStartTrackingButton's onclick),
+    // where a failure is guaranteed to surface via the banner/alert.
     if (!navigator.xr) {
         console.warn('WebXR not supported by this browser.');
         showXrDiagnostic('WebXR is not supported by this browser — open this page in the headset\'s built-in browser.');
-        return;
     }
-    navigator.xr.isSessionSupported('immersive-ar').then((arSupported) => {
-        if (arSupported) {
-            createStartTrackingButton(true);
-            return;
-        }
-        // Passthrough AR unavailable on this browser/headset -- fall back to a plain VR
-        // session instead of leaving the operator with no button at all (this was previously
-        // a silent dead end: no button, no banner, indistinguishable from a broken page). The
-        // operator loses camera see-through, but can still see the robot via the camera panels
-        // already streamed into the scene (see send_camera_frames / this.cameraPanels), so
-        // teleop is still usable.
-        console.warn('immersive-ar not supported; falling back to immersive-vr (no passthrough).');
-        navigator.xr.isSessionSupported('immersive-vr').then((vrSupported) => {
-            if (vrSupported) {
-                showXrDiagnostic(
-                    'Passthrough AR is not supported on this device — starting in VR-only mode ' +
-                    '(no see-through). Use the in-scene robot camera panels to see the robot.'
-                );
-                createStartTrackingButton(false);
-            } else {
-                showXrDiagnostic(
-                    'Neither passthrough AR nor VR sessions are supported by this browser/device. ' +
-                    'Check headset firmware and browser WebXR support, then reload this page.'
-                );
-            }
-        }).catch((err) => {
-            console.error('Error checking immersive-vr support:', err);
-            showXrDiagnostic(`Error checking VR support: ${err.message}`);
-        });
-    }).catch((err) => {
-        console.error('Error checking immersive-ar support:', err);
-        showXrDiagnostic(`Error checking AR support: ${err.message}`);
-    });
-} 
+    createStartTrackingButton();
+}

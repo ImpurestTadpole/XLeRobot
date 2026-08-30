@@ -23,6 +23,8 @@
 
 ##### [🔨 Assembly Dual-wheel](getting_started/assemble_2wheel)
 
+##### [🔨 Assembly Mecanum wheels](getting_started/assemble_mecanum)
+
 ##### [🛠️ Hardware Intro](hardware_intro/index)
 
 ---
@@ -34,6 +36,7 @@ getting_started/material
 getting_started/3d
 getting_started/assemble
 getting_started/assemble_2wheel
+getting_started/assemble_mecanum
 ```
 
 ```{toctree}

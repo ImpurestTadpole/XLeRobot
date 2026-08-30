@@ -5,8 +5,8 @@
 演示agent控制XLeRobot，任务是抓取笔记本并交给人类：
 
 <video width="100%" controls>
-  <source src="https://github-production-user-asset-6210df.s3.amazonaws.com/50213363/528949330-faf375cf-d29a-4b1b-b0b1-da474c7006fe.mov?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAVCODYLSA53PQK4ZA%2F20251221%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20251221T111424Z&X-Amz-Expires=300&X-Amz-Signature=3cc0d5a82bf005bb517e77f3fdcd59f906601cb0a8df5158e3e50806067c734a&X-Amz-SignedHeaders=host" type="video/mp4">
-  To be uploaded.
+  <source src="https://vector-wangel.github.io/XLeRobot-assets/videos/Real_demos/agent_in_action.mov" type="video/mp4">
+  Your browser does not support the video tag.
 </video>
 
 ### 开始使用

@@ -56,17 +56,36 @@ AFRAME.registerComponent('controller-updater', {
       this.websocket.onopen = (event) => {
         console.log(`WebSocket connected to ${websocketUrl}`);
         this.reportVRStatus(true);
+        const banner = document.getElementById('xr-diagnostic-banner');
+        if (banner) banner.remove();
       };
       this.websocket.onerror = (event) => {
         // More detailed error logging
         console.error(`WebSocket Error: Event type: ${event.type}`, event);
         this.reportVRStatus(false);
+        // The single most common cause: the HTTPS page (this origin, port 8443) and the
+        // WebSocket server (port 8442) use the same self-signed cert, but browsers trust
+        // self-signed certs per origin+port -- accepting the warning for 8443 does NOT also
+        // trust 8442. If this page was never separately opened at :8442, every WS handshake
+        // fails right here, silently (browsers don't expose the real reason to JS), and no
+        // button press can ever reach the server even if the VR session itself looks fine.
+        showXrDiagnostic(
+            `Cannot reach the control server at ${websocketUrl}. Open ` +
+            `https://${serverHostname}:${websocketPort} in a new browser tab, accept the ` +
+            `"not secure" certificate warning there, then reload this page.`
+        );
       };
       this.websocket.onclose = (event) => {
         console.log(`WebSocket disconnected from ${websocketUrl}. Clean close: ${event.wasClean}, Code: ${event.code}, Reason: '${event.reason}'`);
         // Attempt to log specific error if available (might be limited by browser security)
         if (!event.wasClean) {
           console.error('WebSocket closed unexpectedly.');
+          showXrDiagnostic(
+              `Lost connection to the control server at ${websocketUrl} (code ${event.code}). ` +
+              `If this happens immediately on page load, open ` +
+              `https://${serverHostname}:${websocketPort} directly and accept its certificate, ` +
+              `then reload this page.`
+          );
         }
         this.websocket = null; // Clear the reference
         this.reportVRStatus(false);

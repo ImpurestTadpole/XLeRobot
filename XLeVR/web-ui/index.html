@@ -5,7 +5,14 @@
     <title>XLeVR - Robot Arm Teleoperation</title>
     <meta name="description" content="XLeVR - Robot Arm Teleoperation">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://aframe.io/releases/1.7.1/aframe.min.js"></script>
+    <!-- Vendored locally (not loaded from the aframe.io CDN): this page is opened from the VR
+         headset over the robot's own local network (https://<jetson-ip>:8443), which commonly
+         has no internet egress at all (isolated/robot AP for camera streaming). A CDN <script>
+         tag on such a network fails to load with zero visible error -- AFRAME stays undefined,
+         every AFRAME.registerComponent(...) call below throws, and the whole script aborts
+         before the Start Controller Tracking button (or anything else) is ever created. That
+         failure mode is indistinguishable from "the button just doesn't show up". -->
+    <script src="aframe-1.7.1.min.js"></script>
     <script src="vr_app.js?v=2026-08-30-fix-buried-button" defer></script>
     <script src="interface.js" defer></script>
     <link rel="stylesheet" href="styles.css">

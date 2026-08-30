@@ -5,7 +5,7 @@
 // a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
 // old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
 // the page has to actually be closed/reopened or hard-reloaded to pick them up).
-const APP_JS_VERSION = '2026-08-30-fix-start-button-ar-fallback';
+const APP_JS_VERSION = '2026-08-30-camera-panel-layout';
 
 // Marks <body> so styles.css can hide .desktop-interface (a near-opaque, full-viewport,
 // z-index:10000 landing page) on a WebXR-capable browser -- otherwise it permanently buries
@@ -144,22 +144,24 @@ AFRAME.registerComponent('controller-updater', {
     };
 
     // Camera panels are laid out in a fixed, tightly-grouped arrangement (independent of the
-    // order frames happen to arrive in): wide head/overview camera on top, centered; wrist
-    // cameras in a row below it, with left_wrist on the operator's left (-X) and right_wrist on
-    // their right (+X), matching the robot's actual left/right.
-    // Vertical gap between the two rows must clear (head half-height + wrist half-height) =
-    // ~0.57m (1.1m-wide head at 4:3 -> 0.83m tall; 0.55m-wide wrists at 16:9 -> 0.31m tall).
-    // 0.4 vs -0.25 leaves a small but safe margin above that.
+    // order frames happen to arrive in): wide head/overview camera on top, centered, with the
+    // depth view immediately to its left (same row); wrist cameras in a row below, with
+    // left_wrist on the operator's left (-X) and right_wrist on their right (+X), matching the
+    // robot's actual left/right.
+    // Vertical gap between the head/depth row and the wrist row must clear (head half-height +
+    // wrist half-height) = ~0.57m (1.1m-wide head at 4:3 -> 0.83m tall; 0.55m-wide wrists at
+    // 16:9 -> 0.31m tall). 0.4 vs -0.2 leaves a small but deliberately tight margin above that,
+    // pulling the wrist row up closer to the head row.
     const CAMERA_PANEL_SLOTS = {
       head: { x: 0, y: 0.4, width: 1.1 },
-      left_wrist: { x: -0.32, y: -0.25, width: 0.55 },
-      right_wrist: { x: 0.32, y: -0.25, width: 0.55 },
-      // Depth view: extends the wrist row to the right (right_wrist's right edge is at
-      // x=0.595), rather than sitting off in the head row at a much wider angle from center —
-      // easier to notice since it's contiguous with the panel cluster the operator is already
-      // looking at. Hidden by default, toggled on/off via RIGHT thumbstick click (see
-      // handleStatusUpdate / XLerobotVRTeleop._update_depth_toggle).
-      head_depth: { x: 0.95, y: -0.25, width: 0.55 },
+      left_wrist: { x: -0.32, y: -0.2, width: 0.55 },
+      right_wrist: { x: 0.32, y: -0.2, width: 0.55 },
+      // Depth view: sits directly left of the head view, same row (head's left edge is at
+      // x=-0.55; depth's right edge at x=-0.625 leaves a small gap) -- easier to compare
+      // against the head/overview camera it corresponds to than off in the wrist row. Hidden
+      // by default, toggled on/off via RIGHT thumbstick click (see handleStatusUpdate /
+      // XLerobotVRTeleop._update_depth_toggle).
+      head_depth: { x: -0.9, y: 0.4, width: 0.55 },
     };
     const PANEL_Z = -1.3;
     const depthPanelName = 'head_depth';
@@ -225,8 +227,8 @@ AFRAME.registerComponent('controller-updater', {
     // than a stack of text lines. Positioned below the wrist camera row, centered under the
     // whole camera group. Canvas is taller than its drawn content (~280px of 380px used) so
     // everything sits in the top portion of the card with clear space below, instead of
-    // stretching/clipping to fill it. Wrist bottom edge is at y=-0.405; at width 1.3 this
-    // panel's half-height is ~0.475, so y=-0.94 clears that with a small margin.
+    // stretching/clipping to fill it. Wrist bottom edge is at y=-0.355; at width 1.3 this
+    // panel's half-height is ~0.475, so y=-0.94 clears that with margin to spare.
     const STATUS_PANEL = { x: 0, y: -0.94, width: 1.3 };
     const STATUS_CANVAS_W = 520;
     const STATUS_CANVAS_H = 380;

@@ -5,7 +5,28 @@
     <title>XLeVR - Robot Arm Teleoperation</title>
     <meta name="description" content="XLeVR - Robot Arm Teleoperation">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://aframe.io/releases/1.7.1/aframe.min.js"></script>
+    <!-- Vendored locally (not loaded from the aframe.io CDN): this page is opened from the VR
+         headset over the robot's own local network (https://<jetson-ip>:8443), which may have
+         no internet egress at all (isolated/robot AP, or just a flaky uplink). A CDN <script>
+         tag on such a network fails to load with zero visible error -- AFRAME stays undefined,
+         every AFRAME.registerComponent(...) call in vr_app.js throws immediately, and the
+         WHOLE script aborts before the Start Controller Tracking button (or anything else) is
+         ever created. That failure mode is indistinguishable from "the button just doesn't
+         show up" -- which is exactly the symptom this was silently causing. -->
+    <script src="aframe-1.7.1.min.js"></script>
+    <script>
+      if (typeof AFRAME === 'undefined') {
+        document.addEventListener('DOMContentLoaded', () => {
+          const b = document.createElement('div');
+          b.style.cssText = 'position:fixed;top:10%;left:50%;transform:translateX(-50%);' +
+            'max-width:80vw;padding:16px 24px;font-size:18px;font-weight:bold;' +
+            'background:#c0392b;color:#fff;border-radius:8px;z-index:10000;text-align:center;';
+          b.textContent = 'Failed to load aframe-1.7.1.min.js -- the VR page cannot start. ' +
+            'Check that web-ui/aframe-1.7.1.min.js exists on the server.';
+          document.body.appendChild(b);
+        });
+      }
+    </script>
     <script src="vr_app.js?v=2026-08-30-fix-start-button-ar-fallback" defer></script>
     <script src="interface.js" defer></script>
     <link rel="stylesheet" href="styles.css">

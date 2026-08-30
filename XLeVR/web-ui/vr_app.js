@@ -5,7 +5,7 @@
 // a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
 // old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
 // the page has to actually be closed/reopened or hard-reloaded to pick them up).
-const APP_JS_VERSION = '2026-08-30-always-show-button';
+const APP_JS_VERSION = '2026-08-30-ws-auto-reconnect';
 
 AFRAME.registerComponent('controller-updater', {
   init: function () {
@@ -48,72 +48,94 @@ AFRAME.registerComponent('controller-updater', {
     const serverHostname = window.location.hostname;
     const websocketPort = 8442; // Make sure this matches controller_server.py
     const websocketUrl = `wss://${serverHostname}:${websocketPort}`;
-    console.log(`Attempting WebSocket connection to: ${websocketUrl}`);
     // !!! IMPORTANT: Replace 'YOUR_LAPTOP_IP' with the actual IP address of your laptop !!!
     // const websocketUrl = 'ws://YOUR_LAPTOP_IP:8442';
-    try {
-      this.websocket = new WebSocket(websocketUrl);
-      this.websocket.onopen = (event) => {
-        console.log(`WebSocket connected to ${websocketUrl}`);
-        this.reportVRStatus(true);
-        const banner = document.getElementById('xr-diagnostic-banner');
-        if (banner) banner.remove();
-      };
-      this.websocket.onerror = (event) => {
-        // More detailed error logging
-        console.error(`WebSocket Error: Event type: ${event.type}`, event);
-        this.reportVRStatus(false);
-        // The single most common cause: the HTTPS page (this origin, port 8443) and the
-        // WebSocket server (port 8442) use the same self-signed cert, but browsers trust
-        // self-signed certs per origin+port -- accepting the warning for 8443 does NOT also
-        // trust 8442. If this page was never separately opened at :8442, every WS handshake
-        // fails right here, silently (browsers don't expose the real reason to JS), and no
-        // button press can ever reach the server even if the VR session itself looks fine.
-        showXrDiagnostic(
-            `Cannot reach the control server at ${websocketUrl}. Open ` +
-            `https://${serverHostname}:${websocketPort} in a new browser tab, accept the ` +
-            `"not secure" certificate warning there, then reload this page.`
-        );
-      };
-      this.websocket.onclose = (event) => {
-        console.log(`WebSocket disconnected from ${websocketUrl}. Clean close: ${event.wasClean}, Code: ${event.code}, Reason: '${event.reason}'`);
-        // Attempt to log specific error if available (might be limited by browser security)
-        if (!event.wasClean) {
-          console.error('WebSocket closed unexpectedly.');
+
+    // A one-shot WebSocket with no retry means the *first* failure (a cert-trust race on
+    // launch, the headset waking from sleep, a brief Wi-Fi drop) permanently kills teleop
+    // until the operator notices and manually reloads the page -- from inside the headset,
+    // with no visible cause, that reads as "the window/teleoperation just stopped working".
+    // connectWebSocket() is instead callable repeatedly and reschedules itself on every
+    // close/error, so the page keeps trying to recover on its own.
+    this._wsReconnectTimer = null;
+    this._wsReconnectAttempts = 0;
+    const connectWebSocket = () => {
+      console.log(`Attempting WebSocket connection to: ${websocketUrl}`);
+      try {
+        this.websocket = new WebSocket(websocketUrl);
+        this.websocket.onopen = (event) => {
+          console.log(`WebSocket connected to ${websocketUrl}`);
+          this._wsReconnectAttempts = 0;
+          this.reportVRStatus(true);
+          const banner = document.getElementById('xr-diagnostic-banner');
+          if (banner) banner.remove();
+        };
+        this.websocket.onerror = (event) => {
+          // More detailed error logging
+          console.error(`WebSocket Error: Event type: ${event.type}`, event);
+          this.reportVRStatus(false);
+          // The single most common cause: the HTTPS page (this origin, port 8443) and the
+          // WebSocket server (port 8442) use the same self-signed cert, but browsers trust
+          // self-signed certs per origin+port -- accepting the warning for 8443 does NOT also
+          // trust 8442. If this page was never separately opened at :8442, every WS handshake
+          // fails right here, silently (browsers don't expose the real reason to JS), and no
+          // button press can ever reach the server even if the VR session itself looks fine.
           showXrDiagnostic(
-              `Lost connection to the control server at ${websocketUrl} (code ${event.code}). ` +
-              `If this happens immediately on page load, open ` +
-              `https://${serverHostname}:${websocketPort} directly and accept its certificate, ` +
-              `then reload this page.`
+              `Cannot reach the control server at ${websocketUrl}. Open ` +
+              `https://${serverHostname}:${websocketPort} in a new browser tab, accept the ` +
+              `"not secure" certificate warning there. Retrying automatically...`
           );
-        }
-        this.websocket = null; // Clear the reference
-        this.reportVRStatus(false);
-      };
-      this.websocket.onmessage = (event) => {
-        if (event.data instanceof Blob) {
-          // Binary message: a JPEG-encoded robot camera frame (see broadcast_camera_frame
-          // in vr_ws_server.py).
-          this.handleCameraFrame(event.data);
-          return;
-        }
-        // Text message: either a status update (see broadcast_status in vr_ws_server.py) or
-        // some other server text we just log, same as before.
-        try {
-          const data = JSON.parse(event.data);
-          if (data && data.type === 'status') {
-            this.handleStatusUpdate(data);
+        };
+        this.websocket.onclose = (event) => {
+          console.log(`WebSocket disconnected from ${websocketUrl}. Clean close: ${event.wasClean}, Code: ${event.code}, Reason: '${event.reason}'`);
+          this.websocket = null; // Clear the reference
+          this.reportVRStatus(false);
+          // Retry with a capped backoff (1s, 2s, 3s, ... up to 5s) instead of giving up --
+          // teleoperation cannot start at all while this.websocket is null, so recovering
+          // without a manual page reload matters more than backing off aggressively.
+          this._wsReconnectAttempts += 1;
+          const delayMs = Math.min(5000, 1000 * this._wsReconnectAttempts);
+          if (!event.wasClean) {
+            console.error('WebSocket closed unexpectedly. Reconnecting in', delayMs, 'ms');
+            showXrDiagnostic(
+                `Lost connection to the control server at ${websocketUrl} (code ${event.code}). ` +
+                `If this keeps happening, open https://${serverHostname}:${websocketPort} ` +
+                `directly and accept its certificate. Retrying automatically...`
+            );
+          }
+          if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
+          this._wsReconnectTimer = setTimeout(connectWebSocket, delayMs);
+        };
+        this.websocket.onmessage = (event) => {
+          if (event.data instanceof Blob) {
+            // Binary message: a JPEG-encoded robot camera frame (see broadcast_camera_frame
+            // in vr_ws_server.py).
+            this.handleCameraFrame(event.data);
             return;
           }
-        } catch (e) {
-          // Not JSON — fall through to plain logging below.
-        }
-        console.log(`WebSocket message received: ${event.data}`); // Log any messages from server
-      };
-    } catch (error) {
-        console.error(`Failed to create WebSocket connection to ${websocketUrl}:`, error);
-        this.reportVRStatus(false);
-    }
+          // Text message: either a status update (see broadcast_status in vr_ws_server.py) or
+          // some other server text we just log, same as before.
+          try {
+            const data = JSON.parse(event.data);
+            if (data && data.type === 'status') {
+              this.handleStatusUpdate(data);
+              return;
+            }
+          } catch (e) {
+            // Not JSON — fall through to plain logging below.
+          }
+          console.log(`WebSocket message received: ${event.data}`); // Log any messages from server
+        };
+      } catch (error) {
+          console.error(`Failed to create WebSocket connection to ${websocketUrl}:`, error);
+          this.reportVRStatus(false);
+          this._wsReconnectAttempts += 1;
+          const delayMs = Math.min(5000, 1000 * this._wsReconnectAttempts);
+          if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
+          this._wsReconnectTimer = setTimeout(connectWebSocket, delayMs);
+      }
+    };
+    connectWebSocket();
     // --- End WebSocket Setup ---
 
     // --- Robot camera panels (floating HUD quads showing the robot's own camera feeds) ---

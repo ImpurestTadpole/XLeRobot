@@ -612,25 +612,12 @@ AFRAME.registerComponent('controller-updater', {
     if (this.rightHandInfoText) this.rightHandInfoText.setAttribute('rotation', textRotation);
 
     // xr-standard gamepad layout used by A-Frame 1.7 / WebXR (NOT the older Oculus-native
-    // indices). buttons[3] is thumbstick click, [4] is X/A, [5] is Y/B. The previous
-    // mapping (x=3, y=4, thumbstick=2) made X look like a thumbstick click and Y like X,
-    // which is why episode start/rerecord felt random.
-    this.leftButtons = { x: false, y: false, squeeze: false, thumbstick: false, menu: false };
-    this.rightButtons = { a: false, b: false, squeeze: false, thumbstick: false, menu: false };
-    const bindFaceButton = (el, store, eventBase, key) => {
-      el.addEventListener(eventBase + 'down', () => { store[key] = true; });
-      el.addEventListener(eventBase + 'up', () => { store[key] = false; });
-    };
-    bindFaceButton(this.leftHand, this.leftButtons, 'xbutton', 'x');
-    bindFaceButton(this.leftHand, this.leftButtons, 'ybutton', 'y');
-    bindFaceButton(this.leftHand, this.leftButtons, 'grip', 'squeeze');
-    bindFaceButton(this.leftHand, this.leftButtons, 'thumbstick', 'thumbstick');
-    bindFaceButton(this.leftHand, this.leftButtons, 'menu', 'menu');
-    bindFaceButton(this.rightHand, this.rightButtons, 'abutton', 'a');
-    bindFaceButton(this.rightHand, this.rightButtons, 'bbutton', 'b');
-    bindFaceButton(this.rightHand, this.rightButtons, 'grip', 'squeeze');
-    bindFaceButton(this.rightHand, this.rightButtons, 'thumbstick', 'thumbstick');
-    bindFaceButton(this.rightHand, this.rightButtons, 'menu', 'menu');
+    // indices): buttons[3] is thumbstick click, [4] is X/A, [5] is Y/B, [1] is squeeze/grip.
+    // The actual button state sent to the server is read directly off the raw gamepad in
+    // tick() below (leftController.buttons / rightController.buttons) using these indices —
+    // see the comment there for why (a previous fix landed only on a parallel, unused
+    // A-Frame-event-based mapping and never touched the raw indices that are actually
+    // transmitted).
 
     // --- Create axis indicators ---
     this.createAxisIndicators();
@@ -1026,12 +1013,19 @@ AFRAME.registerComponent('controller-updater', {
                     y: leftGamepad.axes[3] || 0
                 };
                 // 侧边按钮（左手柄使用 X/Y 命名，避免与右手柄 A/B 混淆）
-                // Quest controller mapping: buttons[3] = X, buttons[4] = Y
+                // xr-standard gamepad mapping (see the comment above leftButtons/rightButtons
+                // near the top of this component): buttons[3] = thumbstick click, [4] = X,
+                // [5] = Y. This is the packet actually sent to the server (leftController.buttons
+                // below feeds vr_ws_server.py's per-hand 'buttons' dict) -- the this.leftButtons
+                // object set up via bindFaceButton() uses A-Frame's own semantic button events and
+                // already had the correct mapping, but nothing ever reads it or sends it, so this
+                // raw block (previously x=3, y=4, thumbstick=2 -- the same wrong indices bindFaceButton
+                // was introduced to fix) was still shipping the bug to the server.
                 leftController.buttons = {
-                    x: !!leftGamepad.buttons[3]?.pressed,  // X button
-                    y: !!leftGamepad.buttons[4]?.pressed,  // Y button
+                    x: !!leftGamepad.buttons[4]?.pressed,  // X button
+                    y: !!leftGamepad.buttons[5]?.pressed,  // Y button
                     squeeze: !!leftGamepad.buttons[1]?.pressed,
-                    thumbstick: !!leftGamepad.buttons[2]?.pressed,
+                    thumbstick: !!leftGamepad.buttons[3]?.pressed,
                     menu: !!leftGamepad.buttons[6]?.pressed,
                     // DIAGNOSTIC (see xlerobot_vr.py _process_left_controller): full raw pressed
                     // state by index, so the server can log ground truth when a named button
@@ -1122,12 +1116,15 @@ AFRAME.registerComponent('controller-updater', {
                     y: rightGamepad.axes[3] || 0
                 };
                 // 侧边按钮
-                // Quest controller mapping: buttons[3] = A, buttons[4] = B
+                // xr-standard gamepad mapping (see leftController.buttons above for why this
+                // raw-index block, not the unused this.rightButtons/bindFaceButton object, is
+                // what actually reaches the server): buttons[3] = thumbstick click, [4] = A,
+                // [5] = B.
                 rightController.buttons = {
-                    a: !!rightGamepad.buttons[3]?.pressed,  // A button (primary)
-                    b: !!rightGamepad.buttons[4]?.pressed,  // B button (secondary)
+                    a: !!rightGamepad.buttons[4]?.pressed,  // A button (primary)
+                    b: !!rightGamepad.buttons[5]?.pressed,  // B button (secondary)
                     squeeze: !!rightGamepad.buttons[1]?.pressed,
-                    thumbstick: !!rightGamepad.buttons[2]?.pressed,
+                    thumbstick: !!rightGamepad.buttons[3]?.pressed,
                     menu: !!rightGamepad.buttons[6]?.pressed
                 };
             }

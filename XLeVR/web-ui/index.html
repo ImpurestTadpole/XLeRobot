@@ -6,7 +6,7 @@
     <meta name="description" content="XLeVR - Robot Arm Teleoperation">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://aframe.io/releases/1.7.1/aframe.min.js"></script>
-    <script src="vr_app.js" defer></script>
+    <script src="vr_app.js?v=2026-08-30-hud-buttons" defer></script>
     <script src="interface.js" defer></script>
     <link rel="stylesheet" href="styles.css">
   </head>
@@ -258,15 +258,17 @@
 
       <!-- Headset tracking entity -->
       <a-entity id="headset" camera>
-        <a-text id="headsetInfo" value="Headset: ..." position="0 0.2 -0.5" rotation="0 0 0" scale="0.05 0.05 0.05" color="yellow" align="center"></a-text>
+        <!-- Debug pose labels stay in the DOM (controller-updater still queries them) but
+             hidden — they sat in the middle of the view and fought the status HUD. -->
+        <a-text id="headsetInfo" value="" visible="false" position="0 0.2 -0.5"></a-text>
       </a-entity>
 
       <!-- Controllers -->
       <a-entity id="leftHand" oculus-touch-controls="hand: left">
-        <a-text id="leftHandInfo" value="Pos: ...\nRot: ..." position="0 0.04 -0.05" rotation="0 0 0" scale="0.05 0.05 0.05" color="white" align="center"></a-text>
+        <a-text id="leftHandInfo" value="" visible="false" position="0 0.04 -0.05"></a-text>
       </a-entity>
       <a-entity id="rightHand" oculus-touch-controls="hand: right">
-        <a-text id="rightHandInfo" value="Pos: ...\nRot: ..." position="0 0.04 -0.05" rotation="0 0 0" scale="0.05 0.05 0.05" color="white" align="center"></a-text>
+        <a-text id="rightHandInfo" value="" visible="false" position="0 0.04 -0.05"></a-text>
       </a-entity>
     </a-scene>
 

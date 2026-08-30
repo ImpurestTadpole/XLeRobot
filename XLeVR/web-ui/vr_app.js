@@ -1,5 +1,12 @@
 // Wait for A-Frame scene to load
 
+// Bump this string whenever this file changes and render it on the status HUD (bottom-right
+// corner of the status card) so it's possible to visually confirm from inside the headset that
+// a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
+// old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
+// the page has to actually be closed/reopened or hard-reloaded to pick them up).
+const APP_JS_VERSION = '2026-08-30-hud-buttons';
+
 AFRAME.registerComponent('controller-updater', {
   init: function () {
     console.log("Controller updater component initialized.");
@@ -65,6 +72,23 @@ AFRAME.registerComponent('controller-updater', {
         this.reportVRStatus(false);
       };
       this.websocket.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+          // Binary message: a JPEG-encoded robot camera frame (see broadcast_camera_frame
+          // in vr_ws_server.py).
+          this.handleCameraFrame(event.data);
+          return;
+        }
+        // Text message: either a status update (see broadcast_status in vr_ws_server.py) or
+        // some other server text we just log, same as before.
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.type === 'status') {
+            this.handleStatusUpdate(data);
+            return;
+          }
+        } catch (e) {
+          // Not JSON — fall through to plain logging below.
+        }
         console.log(`WebSocket message received: ${event.data}`); // Log any messages from server
       };
     } catch (error) {
@@ -72,6 +96,433 @@ AFRAME.registerComponent('controller-updater', {
         this.reportVRStatus(false);
     }
     // --- End WebSocket Setup ---
+
+    // --- Robot camera panels (floating HUD quads showing the robot's own camera feeds) ---
+    // Keyed by camera name -> { canvas, ctx, plane }
+    this.cameraPanels = {};
+
+    this.handleCameraFrame = async (blob) => {
+      try {
+        const buf = await blob.arrayBuffer();
+        const bytes = new Uint8Array(buf);
+        const nameLen = bytes[0];
+        const camName = new TextDecoder('utf-8').decode(bytes.slice(1, 1 + nameLen));
+        const jpegBytes = bytes.slice(1 + nameLen);
+        const bitmap = await createImageBitmap(new Blob([jpegBytes], { type: 'image/jpeg' }));
+        this.drawCameraFrame(camName, bitmap);
+        bitmap.close();
+      } catch (error) {
+        console.error('Error handling camera frame:', error);
+      }
+    };
+
+    this.drawCameraFrame = (camName, bitmap) => {
+      let panel = this.cameraPanels[camName];
+      if (!panel) {
+        panel = this.createCameraPanel(camName, bitmap.width, bitmap.height);
+        this.cameraPanels[camName] = panel;
+      }
+      panel.ctx.drawImage(bitmap, 0, 0, panel.canvas.width, panel.canvas.height);
+      // Look up the live material each frame rather than relying on a reference cached once at
+      // 'loaded' time — some WebXR browsers swap/rebuild the material internally, which would
+      // otherwise leave us marking a stale, no-longer-rendered texture as dirty (frozen frame).
+      const mesh = panel.plane.getObject3D('mesh');
+      const map = mesh && mesh.material && mesh.material.map;
+      if (map) {
+        map.needsUpdate = true;
+        if (mesh.material) mesh.material.needsUpdate = true;
+      }
+    };
+
+    // Camera panels are laid out in a fixed, tightly-grouped arrangement (independent of the
+    // order frames happen to arrive in): wide head/overview camera on top, centered; wrist
+    // cameras in a row below it, with left_wrist on the operator's left (-X) and right_wrist on
+    // their right (+X), matching the robot's actual left/right.
+    // Vertical gap between the two rows must clear (head half-height + wrist half-height) =
+    // ~0.57m (1.1m-wide head at 4:3 -> 0.83m tall; 0.55m-wide wrists at 16:9 -> 0.31m tall).
+    // 0.4 vs -0.25 leaves a small but safe margin above that.
+    const CAMERA_PANEL_SLOTS = {
+      head: { x: 0, y: 0.4, width: 1.1 },
+      left_wrist: { x: -0.32, y: -0.25, width: 0.55 },
+      right_wrist: { x: 0.32, y: -0.25, width: 0.55 },
+      // Depth view: extends the wrist row to the right (right_wrist's right edge is at
+      // x=0.595), rather than sitting off in the head row at a much wider angle from center —
+      // easier to notice since it's contiguous with the panel cluster the operator is already
+      // looking at. Hidden by default, toggled on/off via RIGHT thumbstick click (see
+      // handleStatusUpdate / XLerobotVRTeleop._update_depth_toggle).
+      head_depth: { x: 0.95, y: -0.25, width: 0.55 },
+    };
+    const PANEL_Z = -1.3;
+    const depthPanelName = 'head_depth';
+
+    // --- Episode start/stop audio cues ---
+    // Generated tones via WebAudio (no audio asset files needed). AudioContext creation is
+    // deferred until first use since it must follow a user gesture on most browsers — the
+    // "Start" button tap that begins the WebXR session counts, but resuming defensively here
+    // covers browsers that suspend it again between session starts.
+    this.audioCtx = null;
+    this.getAudioCtx = () => {
+      if (!this.audioCtx) {
+        const AudioCtor = window.AudioContext || window.webkitAudioContext;
+        this.audioCtx = new AudioCtor();
+      }
+      if (this.audioCtx.state === 'suspended') {
+        this.audioCtx.resume();
+      }
+      return this.audioCtx;
+    };
+
+    this.playTone = (freq, startDelayMs, durationMs) => {
+      try {
+        const ctx = this.getAudioCtx();
+        const startAt = ctx.currentTime + startDelayMs / 1000;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.0001, startAt);
+        gain.gain.exponentialRampToValueAtTime(0.2, startAt + 0.01);
+        gain.gain.exponentialRampToValueAtTime(0.0001, startAt + durationMs / 1000);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(startAt);
+        osc.stop(startAt + durationMs / 1000 + 0.02);
+      } catch (error) {
+        console.error('Error playing tone:', error);
+      }
+    };
+
+    // Rising two-note chime for "recording started"; falling two-note chime for "stopped" —
+    // distinct enough to tell apart without looking at the HUD.
+    this.playEpisodeStartSound = () => {
+      this.playTone(880, 0, 110);
+      this.playTone(1318.5, 120, 160);
+    };
+    this.playEpisodeStopSound = () => {
+      this.playTone(659.25, 0, 130);
+      this.playTone(392, 140, 220);
+    };
+    // Single short high tone — "control re-enabled" (the LEFT X recording gate just opened; see
+    // teleop.vr_event_handler.reset_recording_gate() / _process_left_x in xlerobot_vr.py).
+    // Deliberately a single note so it doesn't get confused with the two-note start/stop chimes.
+    this.playControlEnabledDing = () => {
+      this.playTone(1567.98, 0, 90);
+    };
+    // --- End audio cues ---
+
+    // --- Status HUD (task / episode / elapsed time / button legend) ---
+    // Drawn on a canvas (same technique as the camera panels) instead of plain <a-text> so the
+    // recording indicator, episode counter and progress bar can actually look like a HUD rather
+    // than a stack of text lines. Positioned below the wrist camera row, centered under the
+    // whole camera group. Canvas is taller than its drawn content (~280px of 380px used) so
+    // everything sits in the top portion of the card with clear space below, instead of
+    // stretching/clipping to fill it. Wrist bottom edge is at y=-0.405; at width 1.3 this
+    // panel's half-height is ~0.475, so y=-0.94 clears that with a small margin.
+    const STATUS_PANEL = { x: 0, y: -0.94, width: 1.3 };
+    const STATUS_CANVAS_W = 520;
+    const STATUS_CANVAS_H = 380;
+
+    // Static legend text — button mapping doesn't change at runtime, so this is just hardcoded
+    // to match the control guide already printed server-side (xlerobot_vr.py's connect() log).
+    const BUTTON_LEGEND = [
+      'Grip: move arm      Trigger: gripper',
+      'R-stick: drive      L-stick: rotate / lift',
+      'X: start recording (once per episode)',
+      'Y: restart ep       B: finish ep',
+      'Menu tap: stop rec  Menu hold: passthrough',
+      'L-stick click: reset robot pose',
+      'R-stick click: toggle depth view',
+    ];
+
+    const drawRoundedRect = (ctx, x, y, w, h, r) => {
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    };
+
+    const formatMmSs = (totalSeconds) => {
+      const s = Math.max(0, Math.round(totalSeconds || 0));
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      return `${m}:${rem.toString().padStart(2, '0')}`;
+    };
+
+    // Creates the off-screen canvas + <a-plane> for the status HUD, same pattern as
+    // createCameraPanel below (off-screen positioning, not display:none, to avoid the
+    // stale-backing-store issue some WebXR browsers have with hidden canvases).
+    this.createStatusPanel = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = STATUS_CANVAS_W;
+      canvas.height = STATUS_CANVAS_H;
+      canvas.id = 'status-hud-canvas';
+      canvas.style.position = 'fixed';
+      canvas.style.left = '-99999px';
+      canvas.style.top = '0';
+      document.body.appendChild(canvas);
+
+      const plane = document.createElement('a-plane');
+      const height = STATUS_PANEL.width * (STATUS_CANVAS_H / STATUS_CANVAS_W);
+      plane.setAttribute('width', STATUS_PANEL.width);
+      plane.setAttribute('height', height);
+      plane.setAttribute('position', `${STATUS_PANEL.x} ${STATUS_PANEL.y} ${PANEL_Z}`);
+      plane.setAttribute('material', `shader: flat; src: #${canvas.id}; side: double; transparent: true`);
+      this.headset.appendChild(plane);
+
+      return { canvas, ctx: canvas.getContext('2d'), plane };
+    };
+
+    this.statusPanelObj = null; // { canvas, ctx, plane }
+    // Merged HUD state: one-shot pings (episode_event, recording_enabled, depth toggle,
+    // passthrough) must not wipe task/episode/elapsed fields from the last full push.
+    this._hudStatus = {};
+
+    // Tracks the last-known depth-view state so setPassthroughDeclutter can restore the depth
+    // panel to the right visibility (rather than force-showing it) when un-hiding the HUD.
+    this._depthViewEnabled = false;
+
+    // The WebXR session here is always requested as immersive-ar (see the enterVR(true) call
+    // above), so camera passthrough itself is already active for the whole session — there is
+    // no separate VR/AR mode to flip mid-session. What "passthrough toggle" (LEFT menu long-press,
+    // see XLerobotVRTeleop._dispatch_semantic's "toggle_passthrough") actually does here is hide
+    // all the floating HUD panels (camera feeds + status card) so the operator gets a fully
+    // unobstructed passthrough view of the real robot/workspace, then restores them on toggle-off.
+    this.setPassthroughDeclutter = (enabled) => {
+      for (const key in this.cameraPanels) {
+        const visible = enabled ? false : (key === depthPanelName ? this._depthViewEnabled : true);
+        this.cameraPanels[key].plane.setAttribute('visible', visible);
+      }
+      if (this.statusPanelObj) {
+        this.statusPanelObj.plane.setAttribute('visible', !enabled);
+      }
+    };
+
+    // status: { task, episode_idx, episode_total, elapsed_s, episode_duration_s,
+    // depth_view_enabled, passthrough_enabled, episode_event } — see teleop.send_status() /
+    // _update_depth_toggle() / _dispatch_semantic() / send_episode_event() in xlerobot_vr.py and
+    // record_loop in lerobot_record.py. Any field may be absent — depth_view_enabled,
+    // passthrough_enabled, recording_enabled and episode_event each arrive on their own the
+    // moment they happen, independent of the once-a-second task/episode update.
+    this.handleStatusUpdate = (incoming) => {
+      if (incoming.episode_event === 'start') {
+        this.playEpisodeStartSound();
+      } else if (incoming.episode_event === 'stop') {
+        this.playEpisodeStopSound();
+      }
+
+      // Ding is one-shot on the gate-open ping; do not persist recording_enabled or it
+      // would retrigger on every later redraw.
+      if (incoming.recording_enabled) {
+        this.playControlEnabledDing();
+      }
+
+      // Merge persistent HUD fields so a depth/passthrough/chime ping cannot blank
+      // the task/episode/timer card.
+      for (const key of Object.keys(incoming)) {
+        if (key === 'type' || key === 'episode_event' || key === 'recording_enabled') continue;
+        this._hudStatus[key] = incoming[key];
+      }
+      const status = this._hudStatus;
+
+      if (incoming.depth_view_enabled !== undefined) {
+        this._depthViewEnabled = incoming.depth_view_enabled;
+        // The depth panel is created lazily by drawCameraFrame the first time a depth frame
+        // arrives (server only sends depth frames while the view is toggled on), so hide/show
+        // it here rather than assuming it already exists.
+        const depthPanel = this.cameraPanels[depthPanelName];
+        if (depthPanel) {
+          depthPanel.plane.setAttribute('visible', incoming.depth_view_enabled);
+        }
+      }
+
+      if (incoming.passthrough_enabled !== undefined) {
+        this.setPassthroughDeclutter(incoming.passthrough_enabled);
+      }
+
+      if (!this.statusPanelObj) {
+        this.statusPanelObj = this.createStatusPanel();
+      }
+      const { canvas, ctx } = this.statusPanelObj;
+      const w = canvas.width;
+      const h = canvas.height;
+      // Episode counter is shown for the whole episode (including the reposition/gate-wait
+      // phase before LEFT X is pressed); recording_active is what's actually true only while
+      // frames are being captured — see `_recording_active` / record_loop in lerobot_record.py.
+      const hasEpisode = status.episode_idx != null && status.episode_total != null;
+      const isRecording = hasEpisode && !!status.recording_active;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Background card.
+      ctx.fillStyle = 'rgba(18, 18, 22, 0.88)';
+      drawRoundedRect(ctx, 0, 0, w, h, 18);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+      ctx.lineWidth = 2;
+      drawRoundedRect(ctx, 1, 1, w - 2, h - 2, 18);
+      ctx.stroke();
+
+      const padX = 24;
+      let cursorY = 36;
+
+      // Recording indicator + episode counter, same row.
+      if (hasEpisode) {
+        ctx.beginPath();
+        ctx.arc(padX + 10, cursorY - 7, 10, 0, Math.PI * 2);
+        ctx.fillStyle = isRecording ? '#ff3b3b' : '#ffb020';
+        ctx.fill();
+        ctx.fillStyle = isRecording ? '#ff3b3b' : '#ffb020';
+        ctx.font = 'bold 26px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText(isRecording ? 'REC' : 'READY', padX + 28, cursorY);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 26px sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(`EP ${status.episode_idx} / ${status.episode_total}`, w - padX, cursorY);
+      } else {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.55)';
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('Not recording', padX, cursorY);
+      }
+      cursorY += 30;
+
+      // Task name, word-wrapped to fit the card width.
+      if (status.task) {
+        ctx.fillStyle = '#e8e8e8';
+        ctx.font = '22px sans-serif';
+        ctx.textAlign = 'left';
+        const maxWidth = w - padX * 2;
+        const words = String(status.task).split(' ');
+        let line = '';
+        const taskLines = [];
+        for (const word of words) {
+          const candidate = line ? `${line} ${word}` : word;
+          if (ctx.measureText(candidate).width > maxWidth && line) {
+            taskLines.push(line);
+            line = word;
+          } else {
+            line = candidate;
+          }
+        }
+        if (line) taskLines.push(line);
+        for (const l of taskLines.slice(0, 2)) {
+          cursorY += 26;
+          ctx.fillText(l, padX, cursorY);
+        }
+        cursorY += 8;
+      }
+
+      // Reposition/gate-wait hint — shown only while EP x/y is up but capture hasn't started yet.
+      if (hasEpisode && !isRecording) {
+        cursorY += 18;
+        ctx.fillStyle = '#ffb020';
+        ctx.font = 'bold 20px sans-serif';
+        ctx.textAlign = 'left';
+        ctx.fillText('Press LEFT X to start recording', padX, cursorY);
+      }
+
+      // Elapsed-time progress bar.
+      if (isRecording && status.elapsed_s != null) {
+        cursorY += 18;
+        const barX = padX;
+        const barW = w - padX * 2;
+        const barH = 12;
+        const duration = status.episode_duration_s || 0;
+        const frac = duration > 0 ? Math.min(1, status.elapsed_s / duration) : 0;
+
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+        drawRoundedRect(ctx, barX, cursorY, barW, barH, barH / 2);
+        ctx.fill();
+
+        if (frac > 0) {
+          ctx.fillStyle = '#3ba3ff';
+          drawRoundedRect(ctx, barX, cursorY, Math.max(barH, barW * frac), barH, barH / 2);
+          ctx.fill();
+        }
+
+        cursorY += barH + 22;
+        ctx.fillStyle = '#cccccc';
+        ctx.font = '20px sans-serif';
+        ctx.textAlign = 'left';
+        const timeLabel = duration > 0
+          ? `${formatMmSs(status.elapsed_s)} / ${formatMmSs(duration)}`
+          : formatMmSs(status.elapsed_s);
+        ctx.fillText(timeLabel, barX, cursorY);
+      }
+
+      // Divider.
+      cursorY += 16;
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padX, cursorY);
+      ctx.lineTo(w - padX, cursorY);
+      ctx.stroke();
+
+      // Button legend.
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+      ctx.font = '17px monospace';
+      ctx.textAlign = 'left';
+      for (const legendLine of BUTTON_LEGEND) {
+        cursorY += 22;
+        ctx.fillText(legendLine, padX, cursorY);
+      }
+
+      // Build-version stamp — see APP_JS_VERSION comment at the top of this file.
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.font = '13px monospace';
+      ctx.textAlign = 'right';
+      ctx.fillText(`js:${APP_JS_VERSION}`, w - padX, h - 14);
+
+      const mesh = this.statusPanelObj.plane.getObject3D('mesh');
+      const map = mesh && mesh.material && mesh.material.map;
+      if (map) {
+        map.needsUpdate = true;
+        if (mesh.material) mesh.material.needsUpdate = true;
+      }
+    };
+    // Draw the legend immediately so the operator sees controls before the first
+    // lerobot-record status push (otherwise the card appears only after ~0.2s).
+    this.handleStatusUpdate({});
+    // --- End status HUD ---
+
+    // Creates an off-screen <canvas> plus an <a-plane> quad (child of the headset entity, so it
+    // acts as a HUD panel) that textures itself from that canvas. One panel is created per
+    // distinct camera name the first time a frame for it arrives.
+    this.createCameraPanel = (camName, width, height) => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.id = `camera-canvas-${camName}`;
+      // Keep the canvas out of the visible layout but NOT display:none — some WebXR browsers
+      // skip updating the backing store of display:none canvases, which would freeze the
+      // texture after the first frame. Positioning off-screen avoids that.
+      canvas.style.position = 'fixed';
+      canvas.style.left = '-99999px';
+      canvas.style.top = '0';
+      document.body.appendChild(canvas);
+
+      // Unknown camera name: fall back to a slot below the known ones instead of overlapping them.
+      const unknownIndex = Object.keys(this.cameraPanels).length;
+      const slot = CAMERA_PANEL_SLOTS[camName] || { x: 0, y: -1.0 - unknownIndex * 0.5, width: 0.7 };
+      const panelHeight = slot.width * (height / width);
+
+      const plane = document.createElement('a-plane');
+      plane.setAttribute('width', slot.width);
+      plane.setAttribute('height', panelHeight);
+      plane.setAttribute('position', `${slot.x} ${slot.y} ${PANEL_Z}`);
+      plane.setAttribute('material', `shader: flat; src: #${canvas.id}; side: double`);
+      this.headset.appendChild(plane);
+
+      const panel = { canvas, ctx: canvas.getContext('2d'), plane };
+      return panel;
+    };
+    // --- End robot camera panels ---
 
     // --- VR Status Reporting Function ---
     this.reportVRStatus = (connected) => {
@@ -107,6 +558,27 @@ AFRAME.registerComponent('controller-updater', {
     const textRotation = '-90 0 0'; // Rotate -90 degrees around X-axis
     if (this.leftHandInfoText) this.leftHandInfoText.setAttribute('rotation', textRotation);
     if (this.rightHandInfoText) this.rightHandInfoText.setAttribute('rotation', textRotation);
+
+    // xr-standard gamepad layout used by A-Frame 1.7 / WebXR (NOT the older Oculus-native
+    // indices). buttons[3] is thumbstick click, [4] is X/A, [5] is Y/B. The previous
+    // mapping (x=3, y=4, thumbstick=2) made X look like a thumbstick click and Y like X,
+    // which is why episode start/rerecord felt random.
+    this.leftButtons = { x: false, y: false, squeeze: false, thumbstick: false, menu: false };
+    this.rightButtons = { a: false, b: false, squeeze: false, thumbstick: false, menu: false };
+    const bindFaceButton = (el, store, eventBase, key) => {
+      el.addEventListener(eventBase + 'down', () => { store[key] = true; });
+      el.addEventListener(eventBase + 'up', () => { store[key] = false; });
+    };
+    bindFaceButton(this.leftHand, this.leftButtons, 'xbutton', 'x');
+    bindFaceButton(this.leftHand, this.leftButtons, 'ybutton', 'y');
+    bindFaceButton(this.leftHand, this.leftButtons, 'grip', 'squeeze');
+    bindFaceButton(this.leftHand, this.leftButtons, 'thumbstick', 'thumbstick');
+    bindFaceButton(this.leftHand, this.leftButtons, 'menu', 'menu');
+    bindFaceButton(this.rightHand, this.rightButtons, 'abutton', 'a');
+    bindFaceButton(this.rightHand, this.rightButtons, 'bbutton', 'b');
+    bindFaceButton(this.rightHand, this.rightButtons, 'grip', 'squeeze');
+    bindFaceButton(this.rightHand, this.rightButtons, 'thumbstick', 'thumbstick');
+    bindFaceButton(this.rightHand, this.rightButtons, 'menu', 'menu');
 
     // --- Create axis indicators ---
     this.createAxisIndicators();
@@ -437,7 +909,7 @@ AFRAME.registerComponent('controller-updater', {
         const leftRotZ = THREE.MathUtils.radToDeg(leftRotEuler.z);
 
         // 添加调试信息
-        console.log(`Left Hand - Visible: ${this.leftHand.object3D.visible}, Pos: ${leftPos.x.toFixed(2)},${leftPos.y.toFixed(2)},${leftPos.z.toFixed(2)}`);
+        // console.log(`Left Hand - Visible: ${this.leftHand.object3D.visible}, Pos: ${leftPos.x.toFixed(2)},${leftPos.y.toFixed(2)},${leftPos.z.toFixed(2)}`);
 
         // Calculate relative rotation if grip is held
         if (this.leftGripDown && this.leftGripInitialRotation) {
@@ -477,7 +949,19 @@ AFRAME.registerComponent('controller-updater', {
           z: this.leftHand.object3D.quaternion.z, 
           w: this.leftHand.object3D.quaternion.w 
         };
-        leftController.trigger = this.leftTriggerDown ? 1 : 0;
+        // Get continuous trigger value from gamepad API (0.0 to 1.0)
+        // Trigger button is typically at index 0 in WebXR gamepads
+        let leftTriggerValue = 0.0;
+        if (this.leftHand && this.leftHand.components && this.leftHand.components['tracked-controls']) {
+            const leftGamepad = this.leftHand.components['tracked-controls'].controller?.gamepad;
+            if (leftGamepad && leftGamepad.buttons && leftGamepad.buttons[0]) {
+                // Get continuous trigger value (0.0 to 1.0)
+                leftTriggerValue = leftGamepad.buttons[0].value || 0.0;
+                // Clamp to valid range
+                leftTriggerValue = Math.max(0.0, Math.min(1.0, leftTriggerValue));
+            }
+        }
+        leftController.trigger = leftTriggerValue;
         leftController.gripActive = this.leftGripDown;
         
         // 采集左手柄的摇杆和按钮信息
@@ -489,13 +973,20 @@ AFRAME.registerComponent('controller-updater', {
                     x: leftGamepad.axes[2] || 0,
                     y: leftGamepad.axes[3] || 0
                 };
-                // 侧边按钮
+                // 侧边按钮（左手柄使用 X/Y 命名，避免与右手柄 A/B 混淆）
+                // Quest controller mapping: buttons[3] = X, buttons[4] = Y
                 leftController.buttons = {
-                    a: !!leftGamepad.buttons[3]?.pressed,
-                    b: !!leftGamepad.buttons[4]?.pressed,
+                    x: !!leftGamepad.buttons[3]?.pressed,  // X button
+                    y: !!leftGamepad.buttons[4]?.pressed,  // Y button
                     squeeze: !!leftGamepad.buttons[1]?.pressed,
                     thumbstick: !!leftGamepad.buttons[2]?.pressed,
-                    menu: !!leftGamepad.buttons[6]?.pressed
+                    menu: !!leftGamepad.buttons[6]?.pressed,
+                    // DIAGNOSTIC (see xlerobot_vr.py _process_left_controller): full raw pressed
+                    // state by index, so the server can log ground truth when a named button
+                    // (esp. 'x', which has been unreliable) doesn't match what's physically
+                    // pressed — lets us confirm/rule out an index-mapping mismatch on this
+                    // specific controller/firmware without guessing. Safe to remove once resolved.
+                    _rawPressed: leftGamepad.buttons.map((b) => !!b?.pressed),
                 };
             }
         }
@@ -554,7 +1045,19 @@ AFRAME.registerComponent('controller-updater', {
           z: this.rightHand.object3D.quaternion.z, 
           w: this.rightHand.object3D.quaternion.w 
         };
-        rightController.trigger = this.rightTriggerDown ? 1 : 0;
+        // Get continuous trigger value from gamepad API (0.0 to 1.0)
+        // Trigger button is typically at index 0 in WebXR gamepads
+        let rightTriggerValue = 0.0;
+        if (this.rightHand && this.rightHand.components && this.rightHand.components['tracked-controls']) {
+            const rightGamepad = this.rightHand.components['tracked-controls'].controller?.gamepad;
+            if (rightGamepad && rightGamepad.buttons && rightGamepad.buttons[0]) {
+                // Get continuous trigger value (0.0 to 1.0)
+                rightTriggerValue = rightGamepad.buttons[0].value || 0.0;
+                // Clamp to valid range
+                rightTriggerValue = Math.max(0.0, Math.min(1.0, rightTriggerValue));
+            }
+        }
+        rightController.trigger = rightTriggerValue;
         rightController.gripActive = this.rightGripDown;
         
         // 采集右手柄的摇杆和按钮信息
@@ -567,9 +1070,10 @@ AFRAME.registerComponent('controller-updater', {
                     y: rightGamepad.axes[3] || 0
                 };
                 // 侧边按钮
+                // Quest controller mapping: buttons[3] = A, buttons[4] = B
                 rightController.buttons = {
-                    a: !!rightGamepad.buttons[3]?.pressed,
-                    b: !!rightGamepad.buttons[4]?.pressed,
+                    a: !!rightGamepad.buttons[3]?.pressed,  // A button (primary)
+                    b: !!rightGamepad.buttons[4]?.pressed,  // B button (secondary)
                     squeeze: !!rightGamepad.buttons[1]?.pressed,
                     thumbstick: !!rightGamepad.buttons[2]?.pressed,
                     menu: !!rightGamepad.buttons[6]?.pressed
@@ -671,6 +1175,33 @@ document.addEventListener('DOMContentLoaded', (event) => {
     addControllerTrackingButton();
 });
 
+// On-page (in-headset) diagnostic banner for WebXR/AR support failures. Console.warn alone is
+// invisible once the operator has the headset on -- there's no tethered devtools in the field --
+// so a "Start Controller Tracking" button that silently never appears looks identical to "the
+// button doesn't work" from inside the headset. This makes the actual reason visible on-page.
+function showXrDiagnostic(message) {
+    let banner = document.getElementById('xr-diagnostic-banner');
+    if (!banner) {
+        banner = document.createElement('div');
+        banner.id = 'xr-diagnostic-banner';
+        banner.style.position = 'fixed';
+        banner.style.top = '10%';
+        banner.style.left = '50%';
+        banner.style.transform = 'translateX(-50%)';
+        banner.style.maxWidth = '80vw';
+        banner.style.padding = '16px 24px';
+        banner.style.fontSize = '18px';
+        banner.style.fontWeight = 'bold';
+        banner.style.backgroundColor = '#c0392b';
+        banner.style.color = 'white';
+        banner.style.borderRadius = '8px';
+        banner.style.zIndex = '10000';
+        banner.style.textAlign = 'center';
+        document.body.appendChild(banner);
+    }
+    banner.textContent = message;
+}
+
 function addControllerTrackingButton() {
     if (navigator.xr) {
         navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
@@ -708,6 +1239,22 @@ function addControllerTrackingButton() {
                 startButton.onclick = () => {
                     console.log('Start Controller Tracking button clicked. Requesting session via A-Frame...');
                     const sceneEl = document.querySelector('a-scene');
+                    // Create/resume the WebAudio context synchronously inside this click handler,
+                    // on the controller-updater component instance (same object playTone() reuses
+                    // later, so this actually warms the context playTone will use). getAudioCtx()
+                    // is otherwise only reached lazily from the first episode start/stop chime — by
+                    // then we're deep inside a WebSocket message callback, not a user-gesture call
+                    // stack, and some mobile/Quest browsers refuse to start (or silently keep
+                    // suspended) an AudioContext created outside one. This click is the one
+                    // guaranteed real user gesture in the whole session.
+                    const ctrlComp = sceneEl && sceneEl.components && sceneEl.components['controller-updater'];
+                    if (ctrlComp && ctrlComp.getAudioCtx) {
+                        try {
+                            ctrlComp.getAudioCtx();
+                        } catch (err) {
+                            console.error('Failed to warm up AudioContext on Start click:', err);
+                        }
+                    }
                     if (sceneEl) {
                         // Use A-Frame's enterVR to handle session start
                         sceneEl.enterVR(true).catch((err) => {
@@ -728,6 +1275,8 @@ function addControllerTrackingButton() {
                     sceneEl.addEventListener('enter-vr', () => {
                         console.log('Entered VR - hiding start button');
                         startButton.style.display = 'none';
+                        const banner = document.getElementById('xr-diagnostic-banner');
+                        if (banner) banner.remove();
                     });
 
                     sceneEl.addEventListener('exit-vr', () => {
@@ -738,11 +1287,18 @@ function addControllerTrackingButton() {
 
             } else {
                 console.warn('immersive-ar session not supported by this browser/device.');
+                showXrDiagnostic(
+                    'Passthrough AR is not supported by this browser/device — the ' +
+                    '"Start Controller Tracking" button will not appear. Check headset firmware ' +
+                    'and enable any experimental passthrough/AR flags, then reload this page.'
+                );
             }
         }).catch((err) => {
             console.error('Error checking immersive-ar support:', err);
+            showXrDiagnostic(`Error checking AR support: ${err.message}`);
         });
     } else {
         console.warn('WebXR not supported by this browser.');
+        showXrDiagnostic('WebXR is not supported by this browser — open this page in the headset\'s built-in browser.');
     }
 } 

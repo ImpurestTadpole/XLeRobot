@@ -171,6 +171,7 @@ class VRWebSocketServer(BaseInputProvider):
     
     async def process_controller_data(self, data: Dict):
         """Process incoming VR controller data."""
+        packet_ts_ms = data.get("timestamp", None)
         # 检查是否有摇杆或按钮操作，只在有操作时打印
         has_thumbstick_or_button_activity = False
         thumbstick_info = []
@@ -204,20 +205,25 @@ class VRWebSocketServer(BaseInputProvider):
                     if pressed_buttons:
                         button_info.append(f"[{hand_name}] Buttons: {', '.join(pressed_buttons)}")
         
-        # 只在有操作时打印
+        # Avoid spamming stdout during recording; keep available at DEBUG level.
         if has_thumbstick_or_button_activity:
-            print(f"[VR_WS] Activity detected:")
-            for info in thumbstick_info:
-                print(f"  {info}")
-            for info in button_info:
-                print(f"  {info}")
+            if thumbstick_info or button_info:
+                logger.debug("[VR_WS] Activity detected:\n  %s", "\n  ".join([*thumbstick_info, *button_info]))
         
         # Process controller data
         if 'leftController' in data:
-            await self.process_single_controller('left', data['leftController'])
+            left_data = dict(data['leftController'])
+            left_data["_packet_ts_ms"] = packet_ts_ms
+            await self.process_single_controller('left', left_data)
         
         if 'rightController' in data:
-            await self.process_single_controller('right', data['rightController'])
+            right_data = dict(data['rightController'])
+            right_data["_packet_ts_ms"] = packet_ts_ms
+            await self.process_single_controller('right', right_data)
+        
+        # Process headset data for head control
+        if 'headset' in data:
+            await self.process_headset(data['headset'])
     
     async def process_single_controller(self, hand: str, data: Dict):
         """Process data for a single controller."""
@@ -227,29 +233,39 @@ class VRWebSocketServer(BaseInputProvider):
         grip_active = data.get('gripActive', False)
         trigger = data.get('trigger', 0)
         thumbstick = data.get('thumbstick', {})
-        
+        buttons = data.get('buttons', {})  # Get button states
+        packet_ts_ms = data.get("_packet_ts_ms", None)
+        # Lerobot send_feedback expects metadata["vr_position"] as [x, y, z] to detect valid VR data
+        vr_position = [float(position.get('x', 0)), float(position.get('y', 0)), float(position.get('z', 0))]
+
         controller = self.left_controller if hand == 'left' else self.right_controller
         
-        # Handle trigger for gripper control
-        trigger_active = trigger > 0.5
-        if trigger_active != controller.trigger_active:
-            controller.trigger_active = trigger_active
-            
-            # Send gripper control goal - do not specify mode to avoid interfering with position control
-            # Reverse behavior: gripper open by default, closes when trigger pressed
-            gripper_goal = ControlGoal(
-                arm=hand,
-                gripper_closed=not trigger_active,  # Inverted: closed when trigger NOT active
-                metadata={
-                    "source": "vr_trigger",
-                    "trigger": trigger,
-                    "trigger_active": trigger_active,
-                    "thumbstick": thumbstick
-                }
-            )
-            await self.send_goal(gripper_goal)
-            
-            logger.info(f"🤏 {hand.upper()} gripper {'OPENED' if trigger_active else 'CLOSED'}")
+        # Handle trigger for gripper control with continuous float values
+        # Ensure trigger is a float (0.0 to 1.0)
+        trigger = float(trigger)
+        trigger = max(0.0, min(1.0, trigger))  # Clamp to valid range
+        trigger_active = trigger > 0.5  # Keep for backward compatibility/logging
+        
+        # Always send trigger value for continuous gripper control
+        # The LeRobot side will handle the continuous mapping
+        controller.trigger_active = trigger_active
+        
+        # Send gripper control goal with continuous trigger value
+        # Note: gripper_closed is kept for backward compatibility but trigger value takes precedence
+        gripper_goal = ControlGoal(
+            arm=hand,
+            gripper_closed=not trigger_active,  # Inverted: closed when trigger NOT active (for backward compatibility)
+            metadata={
+                "source": "vr_trigger",
+                "trigger": trigger,  # Continuous float value (0.0 to 1.0)
+                "trigger_active": trigger_active,  # Boolean for backward compatibility
+                "thumbstick": thumbstick,
+                "buttons": buttons,  # Include button states
+                "packet_ts_ms": packet_ts_ms,
+                "vr_position": vr_position,  # For lerobot send_feedback validation
+            }
+        )
+        await self.send_goal(gripper_goal)
         
         # Handle grip button for arm movement control
         # Arms ONLY move when grip button is pressed (squeeze to activate)
@@ -285,12 +301,17 @@ class VRWebSocketServer(BaseInputProvider):
                         "reset_target_to_current": True,  # Signal to reset target to current position
                         "trigger": trigger,
                         "trigger_active": trigger_active,
-                        "thumbstick": thumbstick
+                        "thumbstick": thumbstick,
+                        "buttons": buttons,
+                        "packet_ts_ms": packet_ts_ms,
+                        "vr_position": vr_position,
                     }
                 )
                 await self.send_goal(reset_goal)
                 
-                logger.info(f"🔒 {hand.upper()} grip activated - controlling {hand} arm (target reset to current position)")
+                logger.debug(
+                    f"🔒 {hand.upper()} grip activated - controlling {hand} arm (target reset to current position)"
+                )
             
             # Compute target position
             if controller.origin_position is not None:
@@ -341,7 +362,10 @@ class VRWebSocketServer(BaseInputProvider):
                         "trigger": trigger,
                         "trigger_active": trigger_active,
                         "thumbstick": thumbstick,
-                        "gripActive": True  # Signal that grip button is pressed
+                        "gripActive": True,
+                        "buttons": buttons,
+                        "packet_ts_ms": packet_ts_ms,
+                        "vr_position": vr_position,
                     }
                 )
                 await self.send_goal(goal)
@@ -369,7 +393,10 @@ class VRWebSocketServer(BaseInputProvider):
                             "trigger": trigger,
                             "trigger_active": trigger_active,
                             "gripActive": False,
-                            "base_control_only": True  # Signal this is for base movement only
+                            "base_control_only": True,
+                            "buttons": buttons,
+                            "packet_ts_ms": packet_ts_ms,
+                            "vr_position": vr_position,
                         }
                     )
                     await self.send_goal(base_goal)
@@ -381,17 +408,20 @@ class VRWebSocketServer(BaseInputProvider):
                         arm=hand,
                         metadata={
                             "source": "vr_thumbstick_stop",
-                            "thumbstick": {"x": 0, "y": 0},  # Zero velocity
+                            "thumbstick": {"x": 0, "y": 0},
                             "trigger": trigger,
                             "trigger_active": trigger_active,
                             "gripActive": False,
                             "base_control_only": True,
-                            "base_stop": True  # Explicit stop signal
+                            "base_stop": True,
+                            "buttons": buttons,
+                            "packet_ts_ms": packet_ts_ms,
+                            "vr_position": vr_position,
                         }
                     )
                     await self.send_goal(stop_goal)
                     controller.thumbstick_active = False
-                    logger.info(f"🛑 {hand.upper()} thumbstick returned to neutral - base STOP")
+                    logger.debug(f"🛑 {hand.upper()} thumbstick returned to neutral - base STOP")
     
     async def handle_grip_release(self, hand: str):
         """Handle grip release for a controller."""
@@ -413,12 +443,13 @@ class VRWebSocketServer(BaseInputProvider):
                     "source": "vr_grip_release",
                     "trigger": 0.0,
                     "trigger_active": False,
-                    "thumbstick": {}
+                    "thumbstick": {},
+                    "buttons": {}  # Include button states (empty when grip released)
                 }
             )
             await self.send_goal(goal)
             
-            logger.info(f"🔓 {hand.upper()} grip released - arm control stopped")
+            logger.debug(f"🔓 {hand.upper()} grip released - arm control stopped")
     
     async def handle_trigger_release(self, hand: str):
         """Handle trigger release for a controller."""
@@ -435,12 +466,13 @@ class VRWebSocketServer(BaseInputProvider):
                     "source": "vr_trigger_release",
                     "trigger": 0.0,
                     "trigger_active": False,
-                    "thumbstick": {}
+                    "thumbstick": {},
+                    "buttons": {}  # Include button states (empty when trigger released)
                 }
             )
             await self.send_goal(goal)
             
-            logger.info(f"🤏 {hand.upper()} gripper CLOSED (trigger released)")
+            logger.debug(f"🤏 {hand.upper()} gripper CLOSED (trigger released)")
     
     def euler_to_quaternion(self, euler_deg: Dict[str, float]) -> np.ndarray:
         """Convert Euler angles in degrees to quaternion [x, y, z, w]."""
@@ -515,6 +547,112 @@ class VRWebSocketServer(BaseInputProvider):
             logger.warning(f"Error extracting pitch from quaternion: {e}")
             return 0.0
     
+    async def process_headset(self, data: Dict):
+        """Process headset orientation data for head control."""
+        try:
+            # Extract quaternion or rotation data
+            quaternion = data.get('quaternion', {})
+            rotation = data.get('rotation', {})
+            
+            # Initialize headset origin on first use
+            if not hasattr(self, 'headset_origin_quaternion'):
+                self.headset_origin_quaternion = None
+                logger.info("🎧 Headset control initialized - origin set on first orientation")
+            
+            # Convert quaternion or rotation to Euler angles
+            head_pan_deg = 0.0  # Yaw (left/right)
+            head_tilt_deg = 0.0  # Pitch (up/down)
+            
+            if quaternion and all(k in quaternion for k in ['x', 'y', 'z', 'w']):
+                # Use quaternion directly
+                current_quat = np.array([quaternion['x'], quaternion['y'], quaternion['z'], quaternion['w']])
+                
+                # Set origin on first use
+                if self.headset_origin_quaternion is None:
+                    self.headset_origin_quaternion = current_quat.copy()
+                    logger.info("🎧 Headset origin quaternion set")
+                
+                # Calculate relative rotation from origin
+                try:
+                    origin_rotation = R.from_quat(self.headset_origin_quaternion)
+                    current_rotation = R.from_quat(current_quat)
+                    relative_rotation = current_rotation * origin_rotation.inv()
+                    
+                    # Extract Euler angles (ZYX order: yaw, pitch, roll)
+                    euler_angles = relative_rotation.as_euler('ZYX', degrees=True)
+                    # Final mapping: VR headset rotation (yaw) controls robot head pan (rotation/side-to-side)
+                    # VR headset pitch (nodding up/down) controls robot head tilt (up/down)
+                    head_pan_deg = euler_angles[1]  # Yaw (inverted for natural movement) -> controls pan (rotation/side-to-side)
+                    head_tilt_deg = euler_angles[2]  # Pitch (nodding) -> controls tilt (up/down)
+                except Exception as e:
+                    logger.debug(f"Error processing headset quaternion: {e}")
+            elif rotation:
+                # Fallback to Euler angles if quaternion not available
+                # Final mapping: VR headset rotation (yaw) controls robot head pan (rotation)
+                # VR headset pitch (nodding) controls robot head tilt (up/down)
+                head_pan_deg = -rotation.get('yaw', 0.0)  # Yaw (inverted) -> controls pan (rotation/side-to-side)
+                head_tilt_deg = rotation.get('pitch', 0.0)  # Pitch (nodding) -> controls tilt (up/down)
+            
+            # Create headset control goal
+            headset_goal = ControlGoal(
+                arm="headset",
+                mode=ControlMode.POSITION_CONTROL,
+                target_position=None,
+                metadata={
+                    "source": "vr_headset",
+                    "head_pan": head_pan_deg,
+                    "head_tilt": head_tilt_deg,
+                }
+            )
+            await self.send_goal(headset_goal)
+            
+        except Exception as e:
+            logger.warning(f"Error processing headset data: {e}")
+    
+    async def broadcast_camera_frame(self, cam_name: str, jpeg_bytes: bytes):
+        """Send a JPEG-encoded robot camera frame to all connected VR clients.
+
+        Sent as a binary WebSocket message with a small wire header so the browser can tell
+        which camera the frame belongs to: [1 byte name length][name utf-8 bytes][JPEG bytes].
+        This is unambiguous against the JSON text control messages the client sends (control
+        data flows the other direction, client -> server), so no separate connection or extra
+        framing is needed.
+        """
+        if not self.clients:
+            return
+
+        name_bytes = cam_name.encode("utf-8")[:255]
+        frame = bytes([len(name_bytes)]) + name_bytes + jpeg_bytes
+
+        stale_clients = set()
+        for client in self.clients:
+            try:
+                await client.send(frame)
+            except websockets.exceptions.ConnectionClosed:
+                stale_clients.add(client)
+        self.clients -= stale_clients
+
+    async def broadcast_status(self, status: dict):
+        """Send small JSON status info (task/episode/elapsed time) to all connected VR clients.
+
+        Sent as a text WebSocket message tagged {"type": "status", ...status} so the client's
+        onmessage handler can tell it apart from binary camera frames (see
+        broadcast_camera_frame) without ambiguity — the client never receives any other JSON
+        message from the server today.
+        """
+        if not self.clients:
+            return
+
+        message = json.dumps({"type": "status", **status})
+
+        stale_clients = set()
+        for client in self.clients:
+            try:
+                await client.send(message)
+            except websockets.exceptions.ConnectionClosed:
+                stale_clients.add(client)
+        self.clients -= stale_clients
+
     async def send_goal(self, goal: ControlGoal):
         """Send a control goal to the command queue or print it if in print-only mode."""
         if self.print_only:

@@ -5,15 +5,13 @@
 // a fresh copy actually loaded, rather than the browser silently reusing an already-open tab's
 // old in-memory JS across `lerobot-record` restarts (server-side edits alone can't fix that —
 // the page has to actually be closed/reopened or hard-reloaded to pick them up).
-const APP_JS_VERSION = '2026-08-30-fix-buried-button';
+const APP_JS_VERSION = '2026-08-30-fix-button-indices';
 
 // Marks <body> so styles.css can hide .desktop-interface (a near-opaque, full-viewport,
 // z-index:10000 landing page) on a WebXR-capable browser -- otherwise it permanently buries
-// the Start Controller Tracking button (z-index 9999) underneath it. See the comment on
-// body.xr-capable in styles.css for why this replaced a display-mode:standalone media query
-// that never matched a normal browser tab. Runs synchronously at script load (this script is
-// `defer`, so document.body already exists) rather than waiting for DOMContentLoaded, so there
-// is no visible flash of the desktop overlay first.
+// the Start Controller Tracking button (z-index 9999) underneath it. Runs synchronously at
+// script load (this script is `defer`, so document.body already exists) rather than waiting
+// for DOMContentLoaded, so there is no visible flash of the desktop overlay first.
 if (navigator.xr) {
   document.body.classList.add('xr-capable');
 }
@@ -59,94 +57,53 @@ AFRAME.registerComponent('controller-updater', {
     const serverHostname = window.location.hostname;
     const websocketPort = 8442; // Make sure this matches controller_server.py
     const websocketUrl = `wss://${serverHostname}:${websocketPort}`;
+    console.log(`Attempting WebSocket connection to: ${websocketUrl}`);
     // !!! IMPORTANT: Replace 'YOUR_LAPTOP_IP' with the actual IP address of your laptop !!!
     // const websocketUrl = 'ws://YOUR_LAPTOP_IP:8442';
-
-    // A one-shot WebSocket with no retry means the *first* failure (a cert-trust race on
-    // launch, the headset waking from sleep, a brief Wi-Fi drop) permanently kills teleop
-    // until the operator notices and manually reloads the page -- from inside the headset,
-    // with no visible cause, that reads as "the window/teleoperation just stopped working".
-    // connectWebSocket() is instead callable repeatedly and reschedules itself on every
-    // close/error, so the page keeps trying to recover on its own.
-    this._wsReconnectTimer = null;
-    this._wsReconnectAttempts = 0;
-    const connectWebSocket = () => {
-      console.log(`Attempting WebSocket connection to: ${websocketUrl}`);
-      try {
-        this.websocket = new WebSocket(websocketUrl);
-        this.websocket.onopen = (event) => {
-          console.log(`WebSocket connected to ${websocketUrl}`);
-          this._wsReconnectAttempts = 0;
-          this.reportVRStatus(true);
-          const banner = document.getElementById('xr-diagnostic-banner');
-          if (banner) banner.remove();
-        };
-        this.websocket.onerror = (event) => {
-          // More detailed error logging
-          console.error(`WebSocket Error: Event type: ${event.type}`, event);
-          this.reportVRStatus(false);
-          // The single most common cause: the HTTPS page (this origin, port 8443) and the
-          // WebSocket server (port 8442) use the same self-signed cert, but browsers trust
-          // self-signed certs per origin+port -- accepting the warning for 8443 does NOT also
-          // trust 8442. If this page was never separately opened at :8442, every WS handshake
-          // fails right here, silently (browsers don't expose the real reason to JS), and no
-          // button press can ever reach the server even if the VR session itself looks fine.
-          showXrDiagnostic(
-              `Cannot reach the control server at ${websocketUrl}. Open ` +
-              `https://${serverHostname}:${websocketPort} in a new browser tab, accept the ` +
-              `"not secure" certificate warning there. Retrying automatically...`
-          );
-        };
-        this.websocket.onclose = (event) => {
-          console.log(`WebSocket disconnected from ${websocketUrl}. Clean close: ${event.wasClean}, Code: ${event.code}, Reason: '${event.reason}'`);
-          this.websocket = null; // Clear the reference
-          this.reportVRStatus(false);
-          // Retry with a capped backoff (1s, 2s, 3s, ... up to 5s) instead of giving up --
-          // teleoperation cannot start at all while this.websocket is null, so recovering
-          // without a manual page reload matters more than backing off aggressively.
-          this._wsReconnectAttempts += 1;
-          const delayMs = Math.min(5000, 1000 * this._wsReconnectAttempts);
-          if (!event.wasClean) {
-            console.error('WebSocket closed unexpectedly. Reconnecting in', delayMs, 'ms');
-            showXrDiagnostic(
-                `Lost connection to the control server at ${websocketUrl} (code ${event.code}). ` +
-                `If this keeps happening, open https://${serverHostname}:${websocketPort} ` +
-                `directly and accept its certificate. Retrying automatically...`
-            );
-          }
-          if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
-          this._wsReconnectTimer = setTimeout(connectWebSocket, delayMs);
-        };
-        this.websocket.onmessage = (event) => {
-          if (event.data instanceof Blob) {
-            // Binary message: a JPEG-encoded robot camera frame (see broadcast_camera_frame
-            // in vr_ws_server.py).
-            this.handleCameraFrame(event.data);
+    try {
+      this.websocket = new WebSocket(websocketUrl);
+      this.websocket.onopen = (event) => {
+        console.log(`WebSocket connected to ${websocketUrl}`);
+        this.reportVRStatus(true);
+      };
+      this.websocket.onerror = (event) => {
+        // More detailed error logging
+        console.error(`WebSocket Error: Event type: ${event.type}`, event);
+        this.reportVRStatus(false);
+      };
+      this.websocket.onclose = (event) => {
+        console.log(`WebSocket disconnected from ${websocketUrl}. Clean close: ${event.wasClean}, Code: ${event.code}, Reason: '${event.reason}'`);
+        // Attempt to log specific error if available (might be limited by browser security)
+        if (!event.wasClean) {
+          console.error('WebSocket closed unexpectedly.');
+        }
+        this.websocket = null; // Clear the reference
+        this.reportVRStatus(false);
+      };
+      this.websocket.onmessage = (event) => {
+        if (event.data instanceof Blob) {
+          // Binary message: a JPEG-encoded robot camera frame (see broadcast_camera_frame
+          // in vr_ws_server.py).
+          this.handleCameraFrame(event.data);
+          return;
+        }
+        // Text message: either a status update (see broadcast_status in vr_ws_server.py) or
+        // some other server text we just log, same as before.
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.type === 'status') {
+            this.handleStatusUpdate(data);
             return;
           }
-          // Text message: either a status update (see broadcast_status in vr_ws_server.py) or
-          // some other server text we just log, same as before.
-          try {
-            const data = JSON.parse(event.data);
-            if (data && data.type === 'status') {
-              this.handleStatusUpdate(data);
-              return;
-            }
-          } catch (e) {
-            // Not JSON — fall through to plain logging below.
-          }
-          console.log(`WebSocket message received: ${event.data}`); // Log any messages from server
-        };
-      } catch (error) {
-          console.error(`Failed to create WebSocket connection to ${websocketUrl}:`, error);
-          this.reportVRStatus(false);
-          this._wsReconnectAttempts += 1;
-          const delayMs = Math.min(5000, 1000 * this._wsReconnectAttempts);
-          if (this._wsReconnectTimer) clearTimeout(this._wsReconnectTimer);
-          this._wsReconnectTimer = setTimeout(connectWebSocket, delayMs);
-      }
-    };
-    connectWebSocket();
+        } catch (e) {
+          // Not JSON — fall through to plain logging below.
+        }
+        console.log(`WebSocket message received: ${event.data}`); // Log any messages from server
+      };
+    } catch (error) {
+        console.error(`Failed to create WebSocket connection to ${websocketUrl}:`, error);
+        this.reportVRStatus(false);
+    }
     // --- End WebSocket Setup ---
 
     // --- Robot camera panels (floating HUD quads showing the robot's own camera feeds) ---
@@ -279,8 +236,8 @@ AFRAME.registerComponent('controller-updater', {
     const BUTTON_LEGEND = [
       'Grip: move arm      Trigger: gripper',
       'R-stick: drive      L-stick: rotate / lift',
-      'X: start recording (once per episode)',
-      'Y: restart ep       B: finish ep',
+      'X: start recording  Y: restart ep',
+      'A: finish ep        B: toggle intervention',
       'Menu tap: stop rec  Menu hold: passthrough',
       'L-stick click: reset robot pose',
       'R-stick click: toggle depth view',
@@ -327,7 +284,7 @@ AFRAME.registerComponent('controller-updater', {
       return { canvas, ctx: canvas.getContext('2d'), plane };
     };
 
-    this.statusPanelObj = null; // { canvas, ctx, plane }
+    this.statusPanelObj = null; // { canvas, ctx, plane }, created lazily on first status message
     // Merged HUD state: one-shot pings (episode_event, recording_enabled, depth toggle,
     // passthrough) must not wipe task/episode/elapsed fields from the last full push.
     this._hudStatus = {};
@@ -612,12 +569,6 @@ AFRAME.registerComponent('controller-updater', {
     if (this.rightHandInfoText) this.rightHandInfoText.setAttribute('rotation', textRotation);
 
     // xr-standard gamepad layout used by A-Frame 1.7 / WebXR (NOT the older Oculus-native
-    // indices): buttons[3] is thumbstick click, [4] is X/A, [5] is Y/B, [1] is squeeze/grip.
-    // The actual button state sent to the server is read directly off the raw gamepad in
-    // tick() below (leftController.buttons / rightController.buttons) using these indices —
-    // see the comment there for why (a previous fix landed only on a parallel, unused
-    // A-Frame-event-based mapping and never touched the raw indices that are actually
-    // transmitted).
 
     // --- Create axis indicators ---
     this.createAxisIndicators();
@@ -1013,14 +964,11 @@ AFRAME.registerComponent('controller-updater', {
                     y: leftGamepad.axes[3] || 0
                 };
                 // 侧边按钮（左手柄使用 X/Y 命名，避免与右手柄 A/B 混淆）
-                // xr-standard gamepad mapping (see the comment above leftButtons/rightButtons
-                // near the top of this component): buttons[3] = thumbstick click, [4] = X,
-                // [5] = Y. This is the packet actually sent to the server (leftController.buttons
-                // below feeds vr_ws_server.py's per-hand 'buttons' dict) -- the this.leftButtons
-                // object set up via bindFaceButton() uses A-Frame's own semantic button events and
-                // already had the correct mapping, but nothing ever reads it or sends it, so this
-                // raw block (previously x=3, y=4, thumbstick=2 -- the same wrong indices bindFaceButton
-                // was introduced to fix) was still shipping the bug to the server.
+                // xr-standard gamepad layout (WebXR spec, what A-Frame 1.7 actually exposes):
+                // 0=trigger, 1=squeeze, 2=(unused/touchpad on some devices), 3=thumbstick click,
+                // 4=X/A, 5=Y/B, 6=menu. buttons[3] is NOT X -- it's the thumbstick click; reading
+                // X from index 3 means a thumbstick click was misread as "X pressed" and the real
+                // X button (index 4) was never read at all.
                 leftController.buttons = {
                     x: !!leftGamepad.buttons[4]?.pressed,  // X button
                     y: !!leftGamepad.buttons[5]?.pressed,  // Y button
@@ -1116,10 +1064,8 @@ AFRAME.registerComponent('controller-updater', {
                     y: rightGamepad.axes[3] || 0
                 };
                 // 侧边按钮
-                // xr-standard gamepad mapping (see leftController.buttons above for why this
-                // raw-index block, not the unused this.rightButtons/bindFaceButton object, is
-                // what actually reaches the server): buttons[3] = thumbstick click, [4] = A,
-                // [5] = B.
+                // xr-standard gamepad layout -- see the comment above leftController.buttons:
+                // buttons[3] = thumbstick click, [4] = A, [5] = B.
                 rightController.buttons = {
                     a: !!rightGamepad.buttons[4]?.pressed,  // A button (primary)
                     b: !!rightGamepad.buttons[5]?.pressed,  // B button (secondary)
@@ -1224,138 +1170,94 @@ document.addEventListener('DOMContentLoaded', (event) => {
     addControllerTrackingButton();
 });
 
-// On-page (in-headset) diagnostic banner for WebXR/AR support failures. Console.warn alone is
-// invisible once the operator has the headset on -- there's no tethered devtools in the field --
-// so a "Start Controller Tracking" button that silently never appears looks identical to "the
-// button doesn't work" from inside the headset. This makes the actual reason visible on-page.
-function showXrDiagnostic(message) {
-    let banner = document.getElementById('xr-diagnostic-banner');
-    if (!banner) {
-        banner = document.createElement('div');
-        banner.id = 'xr-diagnostic-banner';
-        banner.style.position = 'fixed';
-        banner.style.top = '10%';
-        banner.style.left = '50%';
-        banner.style.transform = 'translateX(-50%)';
-        banner.style.maxWidth = '80vw';
-        banner.style.padding = '16px 24px';
-        banner.style.fontSize = '18px';
-        banner.style.fontWeight = 'bold';
-        banner.style.backgroundColor = '#c0392b';
-        banner.style.color = 'white';
-        banner.style.borderRadius = '8px';
-        banner.style.zIndex = '10000';
-        banner.style.textAlign = 'center';
-        document.body.appendChild(banner);
-    }
-    banner.textContent = message;
-}
-
-function createStartTrackingButton() {
-    // Create Start Controller Tracking button
-    const startButton = document.createElement('button');
-    startButton.id = 'start-tracking-button';
-    startButton.textContent = 'Start Controller Tracking';
-    startButton.style.position = 'fixed';
-    startButton.style.top = '50%';
-    startButton.style.left = '50%';
-    startButton.style.transform = 'translate(-50%, -50%)';
-    startButton.style.padding = '20px 40px';
-    startButton.style.fontSize = '20px';
-    startButton.style.fontWeight = 'bold';
-    startButton.style.backgroundColor = '#4CAF50';
-    startButton.style.color = 'white';
-    startButton.style.border = 'none';
-    startButton.style.borderRadius = '8px';
-    startButton.style.cursor = 'pointer';
-    startButton.style.zIndex = '9999';
-    startButton.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)';
-    startButton.style.transition = 'all 0.3s ease';
-
-    // Hover effects
-    startButton.addEventListener('mouseenter', () => {
-        startButton.style.backgroundColor = '#45a049';
-        startButton.style.transform = 'translate(-50%, -50%) scale(1.05)';
-    });
-    startButton.addEventListener('mouseleave', () => {
-        startButton.style.backgroundColor = '#4CAF50';
-        startButton.style.transform = 'translate(-50%, -50%) scale(1)';
-    });
-
-    startButton.onclick = () => {
-        console.log('Start Controller Tracking button clicked. Requesting session via A-Frame...');
-        const sceneEl = document.querySelector('a-scene');
-        // Create/resume the WebAudio context synchronously inside this click handler,
-        // on the controller-updater component instance (same object playTone() reuses
-        // later, so this actually warms the context playTone will use). getAudioCtx()
-        // is otherwise only reached lazily from the first episode start/stop chime — by
-        // then we're deep inside a WebSocket message callback, not a user-gesture call
-        // stack, and some mobile/Quest browsers refuse to start (or silently keep
-        // suspended) an AudioContext created outside one. This click is the one
-        // guaranteed real user gesture in the whole session.
-        const ctrlComp = sceneEl && sceneEl.components && sceneEl.components['controller-updater'];
-        if (ctrlComp && ctrlComp.getAudioCtx) {
-            try {
-                ctrlComp.getAudioCtx();
-            } catch (err) {
-                console.error('Failed to warm up AudioContext on Start click:', err);
-            }
-        }
-        if (!sceneEl) {
-            console.error('A-Frame scene not found for enterVR call!');
-            showXrDiagnostic('Internal error: <a-scene> not found. Reload the page.');
-            return;
-        }
-        // Try AR (passthrough) first, then fall back to plain VR on failure -- resolved here,
-        // at the one guaranteed user-gesture click, instead of gating the button's very
-        // existence on an earlier isSessionSupported() pre-check. That pre-check runs
-        // asynchronously on page load with no user gesture backing it, and on at least one
-        // real headset silently never resolved either branch, meaning the button never
-        // appeared at all with no error anywhere. Trying enterVR directly here can't have that
-        // failure mode: the button is now unconditional, and only this actual attempt can fail.
-        sceneEl.enterVR(true).catch((arErr) => {
-            console.warn('AR session failed, falling back to plain VR:', arErr);
-            return sceneEl.enterVR(false).catch((vrErr) => {
-                console.error('Both AR and VR session requests failed:', arErr, vrErr);
-                showXrDiagnostic(
-                    `Could not start a VR/AR session: ${vrErr.message}. ` +
-                    'Check headset WebXR support and browser permissions, then reload.'
-                );
-                alert(`Failed to start VR/AR session: ${vrErr.message}`);
-            });
-        });
-    };
-
-    document.body.appendChild(startButton);
-    console.log('"Start Controller Tracking" button added (tries AR, falls back to VR on click).');
-
-    // Listen for VR session events to hide/show start button
-    const sceneEl = document.querySelector('a-scene');
-    if (sceneEl) {
-        sceneEl.addEventListener('enter-vr', () => {
-            console.log('Entered VR - hiding start button');
-            startButton.style.display = 'none';
-            const banner = document.getElementById('xr-diagnostic-banner');
-            if (banner) banner.remove();
-        });
-
-        sceneEl.addEventListener('exit-vr', () => {
-            console.log('Exited VR - showing start button');
-            startButton.style.display = 'block';
-        });
-    }
-}
-
 function addControllerTrackingButton() {
-    // Always create the button -- do not gate its existence on an async
-    // navigator.xr.isSessionSupported() pre-check. That check has no user gesture behind it
-    // and on at least one real headset silently never resolved either branch, so the button
-    // never appeared and nothing was ever logged or shown. AR-vs-VR and unsupported-browser
-    // handling now happens at click time instead (see createStartTrackingButton's onclick),
-    // where a failure is guaranteed to surface via the banner/alert.
-    if (!navigator.xr) {
+    if (navigator.xr) {
+        navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+            if (supported) {
+                // Create Start Controller Tracking button
+                const startButton = document.createElement('button');
+                startButton.id = 'start-tracking-button';
+                startButton.textContent = 'Start Controller Tracking';
+                startButton.style.position = 'fixed';
+                startButton.style.top = '50%';
+                startButton.style.left = '50%';
+                startButton.style.transform = 'translate(-50%, -50%)';
+                startButton.style.padding = '20px 40px';
+                startButton.style.fontSize = '20px';
+                startButton.style.fontWeight = 'bold';
+                startButton.style.backgroundColor = '#4CAF50';
+                startButton.style.color = 'white';
+                startButton.style.border = 'none';
+                startButton.style.borderRadius = '8px';
+                startButton.style.cursor = 'pointer';
+                startButton.style.zIndex = '9999';
+                startButton.style.boxShadow = '0 4px 8px rgba(0,0,0,0.3)';
+                startButton.style.transition = 'all 0.3s ease';
+
+                // Hover effects
+                startButton.addEventListener('mouseenter', () => {
+                    startButton.style.backgroundColor = '#45a049';
+                    startButton.style.transform = 'translate(-50%, -50%) scale(1.05)';
+                });
+                startButton.addEventListener('mouseleave', () => {
+                    startButton.style.backgroundColor = '#4CAF50';
+                    startButton.style.transform = 'translate(-50%, -50%) scale(1)';
+                });
+
+                startButton.onclick = () => {
+                    console.log('Start Controller Tracking button clicked. Requesting session via A-Frame...');
+                    const sceneEl = document.querySelector('a-scene');
+                    // Create/resume the WebAudio context synchronously inside this click handler,
+                    // on the controller-updater component instance (same object playTone() reuses
+                    // later, so this actually warms the context playTone will use). getAudioCtx()
+                    // is otherwise only reached lazily from the first episode start/stop chime — by
+                    // then we're deep inside a WebSocket message callback, not a user-gesture call
+                    // stack, and some mobile/Quest browsers refuse to start (or silently keep
+                    // suspended) an AudioContext created outside one. This click is the one
+                    // guaranteed real user gesture in the whole session.
+                    const ctrlComp = sceneEl && sceneEl.components && sceneEl.components['controller-updater'];
+                    if (ctrlComp && ctrlComp.getAudioCtx) {
+                        try {
+                            ctrlComp.getAudioCtx();
+                        } catch (err) {
+                            console.error('Failed to warm up AudioContext on Start click:', err);
+                        }
+                    }
+                    if (sceneEl) {
+                        // Use A-Frame's enterVR to handle session start
+                        sceneEl.enterVR(true).catch((err) => {
+                            console.error('A-Frame failed to enter VR/AR:', err);
+                            alert(`Failed to start AR session via A-Frame: ${err.message}`);
+                        });
+                    } else {
+                         console.error('A-Frame scene not found for enterVR call!');
+                    }
+                };
+
+                document.body.appendChild(startButton);
+                console.log('Official "Start Controller Tracking" button added.');
+
+                // Listen for VR session events to hide/show start button
+                const sceneEl = document.querySelector('a-scene');
+                if (sceneEl) {
+                    sceneEl.addEventListener('enter-vr', () => {
+                        console.log('Entered VR - hiding start button');
+                        startButton.style.display = 'none';
+                    });
+
+                    sceneEl.addEventListener('exit-vr', () => {
+                        console.log('Exited VR - showing start button');
+                        startButton.style.display = 'block';
+                    });
+                }
+
+            } else {
+                console.warn('immersive-ar session not supported by this browser/device.');
+            }
+        }).catch((err) => {
+            console.error('Error checking immersive-ar support:', err);
+        });
+    } else {
         console.warn('WebXR not supported by this browser.');
-        showXrDiagnostic('WebXR is not supported by this browser — open this page in the headset\'s built-in browser.');
     }
-    createStartTrackingButton();
-}
+} 

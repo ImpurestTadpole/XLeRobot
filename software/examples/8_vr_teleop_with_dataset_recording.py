@@ -5,6 +5,7 @@ Uses handle_vr_input with delta action control
 """
 
 # Standard library imports
+import argparse
 import asyncio
 import logging
 import math
@@ -19,9 +20,9 @@ import numpy as np
 
 # Local imports
 from XLeVR.vr_monitor import VRMonitor
-from lerobot.robots.xlerobot import XLerobotConfig, XLerobot
+from lerobot_robot_xlerobot import XLerobotConfig, XLerobot
 from lerobot.utils.robot_utils import precise_sleep
-from lerobot.model.SO101Robot import SO101Kinematics
+from xlerobot_model.SO101Robot import SO101Kinematics
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, OBS_STR
 from lerobot.datasets.utils import hw_to_dataset_features, build_dataset_frame
@@ -575,6 +576,15 @@ def main():
     print("XLerobot VR Control Example")
     print("="*50)
 
+    global FPS
+    parser = argparse.ArgumentParser(description="XLerobot VR Teleop with Dataset Recording")
+    parser.add_argument("--robot.id", type=str, default="my_xlerobot", help="Robot config id")
+    parser.add_argument("--robot.port1", type=str, default="/dev/ttyACM0", help="Port 1 (so101 + head camera)")
+    parser.add_argument("--robot.port2", type=str, default="/dev/ttyACM1", help="Port 2 (same as lekiwi setup)")
+    parser.add_argument("--fps", type=int, default=FPS, help="Control loop / dataset frequency")
+    args = parser.parse_args()
+    FPS = args.fps
+
     shutdown_event = threading.Event()
     saving_in_progress_event = threading.Event()
 
@@ -582,8 +592,11 @@ def main():
 
     try:
         # Try to use saved calibration file to avoid recalibrating each time
-        # You can modify robot_id here to match your robot configuration
-        robot_config = XLerobotConfig()  # Can be modified to your robot ID
+        robot_config = XLerobotConfig(
+            id=getattr(args, "robot.id"),
+            port1=getattr(args, "robot.port1"),
+            port2=getattr(args, "robot.port2"),
+        )
         robot = XLerobot(robot_config)
         
         try:

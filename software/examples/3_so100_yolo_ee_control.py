@@ -9,6 +9,7 @@ YOLO stream displays object detection but does NOT control the robot
 Video stream and robot control are completely independent
 """
 
+import argparse
 import time
 import logging
 import traceback
@@ -449,16 +450,12 @@ def main():
         from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
         from lerobot.teleoperators.keyboard.configuration_keyboard import KeyboardTeleopConfig
         
-        # Get port
-        port = input("Please enter SO100 robot USB port (e.g.: /dev/ttyACM0): ").strip()
-        
-        # If Enter is pressed directly, use default port
-        if not port:
-            port = "/dev/ttyACM0"
-            print(f"Using default port: {port}")
-        else:
-            print(f"Connecting to port: {port}")
-        
+        parser = argparse.ArgumentParser(description="SO100 YOLO EE Control")
+        parser.add_argument("--robot.port", type=str, default="/dev/ttyACM0", help="SO100 robot USB port")
+        args = parser.parse_args()
+        port = getattr(args, "robot.port")
+        print(f"Connecting to port: {port}")
+
         # Configure robot
         robot_config = SO100FollowerConfig(port=port)
         robot = SO100Follower(robot_config)

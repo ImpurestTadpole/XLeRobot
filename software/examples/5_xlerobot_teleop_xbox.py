@@ -1,23 +1,25 @@
 # To Run on the host
 '''
-PYTHONPATH=src python -m lerobot.robots.xlerobot.xlerobot_host --robot.id=my_xlerobot
+python -m lerobot_robot_xlerobot.xlerobot_host --robot.id=my_xlerobot
 '''
 
 # To Run the teleop:
 '''
-PYTHONPATH=src python -m examples.xlerobot.teleoperate_XBOX
+python examples/5_xlerobot_teleop_xbox.py
+# Optional: --robot.id=my_xlerobot --robot.port1=/dev/ttyACM0 --robot.port2=/dev/ttyACM1 --fps=30
 '''
 
+import argparse
 import time
 import numpy as np
 import math
 import pygame
 
-from lerobot.robots.xlerobot import XLerobotConfig, XLerobot
+from lerobot_robot_xlerobot import XLerobotConfig, XLerobot
 # from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-from lerobot.model.SO101Robot import SO101Kinematics
+from xlerobot_model.SO101Robot import SO101Kinematics
 
 # Keymaps (semantic action: controller mapping) - Intuitive human control
 LEFT_KEYMAP = {
@@ -402,8 +404,19 @@ def get_base_speed_control(joystick):
 
 
 def main():
-    FPS = 30
-    robot_config = XLerobotConfig()
+    parser = argparse.ArgumentParser(description="XLerobot Xbox Teleop")
+    parser.add_argument("--robot.id", type=str, default="my_xlerobot", help="Robot config id")
+    parser.add_argument("--robot.port1", type=str, default="/dev/ttyACM0", help="Port 1 (so101 + head camera)")
+    parser.add_argument("--robot.port2", type=str, default="/dev/ttyACM1", help="Port 2 (same as lekiwi setup)")
+    parser.add_argument("--fps", type=int, default=30, help="Control loop frequency")
+    args = parser.parse_args()
+
+    FPS = args.fps
+    robot_config = XLerobotConfig(
+        id=getattr(args, "robot.id"),
+        port1=getattr(args, "robot.port1"),
+        port2=getattr(args, "robot.port2"),
+    )
     robot = XLerobot(robot_config)
     try:
         robot.connect()

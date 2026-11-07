@@ -7,6 +7,7 @@ Supports simultaneous control of two robot arms: /dev/ttyACM0 and /dev/ttyACM1
 Keyboard mapping: First arm (7y8u9i0o-p=[), Second arm (hbjnkml,;.'/)
 """
 
+import argparse
 import time
 import logging
 import traceback
@@ -463,12 +464,17 @@ def main():
 
         from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop
         from lerobot.teleoperators.keyboard.configuration_keyboard import KeyboardTeleopConfig
-        
+
+        parser = argparse.ArgumentParser(description="Dual SO100 Keyboard EE Control")
+        parser.add_argument("--arm1.port", type=str, default="/dev/ttyACM0", help="First arm's USB port")
+        parser.add_argument("--arm2.port", type=str, default="/dev/ttyACM1", help="Second arm's USB port")
+        args = parser.parse_args()
+
         # Configure dual-arm robots
-        arm1_port = "/dev/ttyACM0"
-        arm2_port = "/dev/ttyACM1"
-        
-        print(f"Configuring first arm: {arm1_port}")  
+        arm1_port = getattr(args, "arm1.port")
+        arm2_port = getattr(args, "arm2.port")
+
+        print(f"Configuring first arm: {arm1_port}")
         print(f"Configuring second arm: {arm2_port}")
         
         # Create dual-arm robot instances

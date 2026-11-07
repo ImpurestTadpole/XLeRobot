@@ -187,18 +187,19 @@ def main():
     args = parser.parse_args()
     
     # Create configs
+    # argparse stores dotted flags as literal attribute names, not nested namespaces
     robot_config = XLerobot2WheelsConfig(
-        id=args.robot.id,
-        port1=args.robot.port1,
-        port2=args.robot.port2,
+        id=getattr(args, "robot.id"),
+        port1=getattr(args, "robot.port1"),
+        port2=getattr(args, "robot.port2"),
     )
-    
+
     host_config = XLerobot2WheelsHostConfig(
-        port_zmq_cmd=args.host.port_zmq_cmd,
-        port_zmq_observations=args.host.port_zmq_observations,
-        connection_time_s=args.host.connection_time_s,
-        watchdog_timeout_ms=args.host.watchdog_timeout_ms,
-        max_loop_freq_hz=args.host.max_loop_freq_hz,
+        port_zmq_cmd=getattr(args, "host.port_zmq_cmd"),
+        port_zmq_observations=getattr(args, "host.port_zmq_observations"),
+        connection_time_s=getattr(args, "host.connection_time_s"),
+        watchdog_timeout_ms=getattr(args, "host.watchdog_timeout_ms"),
+        max_loop_freq_hz=getattr(args, "host.max_loop_freq_hz"),
     )
     
     # Create and run host

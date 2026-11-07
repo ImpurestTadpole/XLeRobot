@@ -1,22 +1,24 @@
 # To Run on the host
 '''python
-PYTHONPATH=src python -m lerobot.robots.xlerobot_2wheels.xlerobot_2wheels_host --robot.id=my_xlerobot_2wheels
+python -m lerobot_robot_xlerobot_2wheels.xlerobot_2wheels_host --robot.id=my_xlerobot_2wheels
 '''
 
 # To Run the teleop:
 '''python
-PYTHONPATH=src python -m examples.xlerobot_2wheels.teleoperate_Keyboard
+python examples/4_xlerobot_2wheels_teleop_keyboard.py
+# Optional: --robot.id=my_xlerobot_2wheels_lab --robot.port1=/dev/ttyACM0 --robot.port2=/dev/ttyACM1 --ip=localhost --fps=50
 '''
 
+import argparse
 import time
 import numpy as np
 import math
 
-from lerobot.robots.xlerobot_2wheels import XLerobot2WheelsClient, XLerobot2WheelsClientConfig, XLerobot2WheelsConfig, XLerobot2Wheels
+from lerobot_robot_xlerobot_2wheels import XLerobot2WheelsClient, XLerobot2WheelsClientConfig, XLerobot2WheelsConfig, XLerobot2Wheels
 # from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-from lerobot.model.SO101Robot import SO101Kinematics
+from xlerobot_model.SO101Robot import SO101Kinematics
 from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 
 # Base speed control parameters - adjustable slopes
@@ -483,20 +485,30 @@ smooth_controller = SmoothBaseController()
 
 
 def main():
+    parser = argparse.ArgumentParser(description="XLerobot2Wheels Keyboard Teleop")
+    parser.add_argument("--robot.id", type=str, default="my_xlerobot_2wheels_lab", help="Robot config id")
+    parser.add_argument("--robot.port1", type=str, default="/dev/ttyACM0", help="Port 1 (arms + head bus)")
+    parser.add_argument("--robot.port2", type=str, default="/dev/ttyACM1", help="Port 2 (arms + wheels bus)")
+    parser.add_argument(
+        "--ip", type=str, default="localhost",
+        help="'localhost' for local/wired connection, or the host's IP for a ZMQ connection",
+    )
+    parser.add_argument("--fps", type=int, default=50, help="Control loop frequency")
+    args = parser.parse_args()
+
     # Teleop parameters
-    FPS = 50
-    # ip = "192.168.1.123"  # This is for zmq connection
-    ip = "localhost"  # This is for local/wired connection
-    # robot_name = "my_xlerobot_2wheels_pc"
-    robot_name = "my_xlerobot_2wheels_lab"
+    FPS = args.fps
 
-    # For zmq connection
-    # robot_config = XLerobot2WheelsClientConfig(remote_ip=ip, id=robot_name)
-    # robot = XLerobot2WheelsClient(robot_config)    
-
-    # For local/wired connection
-    robot_config = XLerobot2WheelsConfig(id=robot_name)
-    robot = XLerobot2Wheels(robot_config)
+    if args.ip == "localhost":
+        robot_config = XLerobot2WheelsConfig(
+            id=getattr(args, "robot.id"),
+            port1=getattr(args, "robot.port1"),
+            port2=getattr(args, "robot.port2"),
+        )
+        robot = XLerobot2Wheels(robot_config)
+    else:
+        robot_config = XLerobot2WheelsClientConfig(remote_ip=args.ip, id=getattr(args, "robot.id"))
+        robot = XLerobot2WheelsClient(robot_config)
     
     try:
         robot.connect()

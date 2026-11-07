@@ -1,23 +1,25 @@
 # To Run on the host
 '''python
-PYTHONPATH=src python -m lerobot.robots.xlerobot.xlerobot_host --robot.id=my_xlerobot
+python -m lerobot_robot_xlerobot.xlerobot_host --robot.id=my_xlerobot
 '''
 
 # To Run the teleop:
 '''python
-PYTHONPATH=src python -m examples.xlerobot.teleoperate_Keyboard
+python examples/4_xlerobot_teleop_keyboard.py
+# Optional: --robot.id=my_xlerobot_pc --robot.port1=/dev/ttyACM0 --robot.port2=/dev/ttyACM1 --fps=50
 '''
 
+import argparse
 import time
 import numpy as np
 import math
 
-from lerobot.robots.xlerobot import XLerobotConfig, XLerobot
-# from lerobot.robots.xlerobot import XLerobotClient, XLerobotClientConfig
+from lerobot_robot_xlerobot import XLerobotConfig, XLerobot
+# from lerobot_robot_xlerobot import XLerobotClient, XLerobotClientConfig
 # from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.robot_utils import precise_sleep
 from lerobot.utils.visualization_utils import init_rerun, log_rerun_data
-from lerobot.model.SO101Robot import SO101Kinematics
+from xlerobot_model.SO101Robot import SO101Kinematics
 # from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
 
         
@@ -386,18 +388,24 @@ class SimpleTeleopArm:
     
 
 def main():
+    parser = argparse.ArgumentParser(description="XLerobot Keyboard Teleop")
+    parser.add_argument("--robot.id", type=str, default="my_xlerobot_pc", help="Robot config id")
+    parser.add_argument("--robot.port1", type=str, default="/dev/ttyACM0", help="Port 1 (so101 + head camera)")
+    parser.add_argument("--robot.port2", type=str, default="/dev/ttyACM1", help="Port 2 (same as lekiwi setup)")
+    parser.add_argument("--fps", type=int, default=50, help="Control loop frequency")
+    args = parser.parse_args()
+
     # Teleop parameters
-    FPS = 50
-    # ip = "192.168.1.123"  # This is for zmq connection
-    ip = "localhost"  # This is for local/wired connection
-    robot_name = "my_xlerobot_pc"
+    FPS = args.fps
 
-    # For zmq connection
-    # robot_config = XLerobotClientConfig(remote_ip=ip, id=robot_name)
-    # robot = XLerobotClient(robot_config)    
-
-    # For local/wired connection
-    robot_config = XLerobotConfig()
+    # Note: the zmq/XLerobotClient connection path is not currently wired up in this
+    # package (XLerobotClient is commented out of lerobot_robot_xlerobot's __init__),
+    # so only the local/wired connection is exposed here.
+    robot_config = XLerobotConfig(
+        id=getattr(args, "robot.id"),
+        port1=getattr(args, "robot.port1"),
+        port2=getattr(args, "robot.port2"),
+    )
     robot = XLerobot(robot_config)
     
     try:
